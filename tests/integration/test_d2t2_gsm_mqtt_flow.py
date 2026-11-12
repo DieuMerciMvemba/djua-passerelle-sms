@@ -87,6 +87,8 @@ class D2T2GsmMqttFlowTests(unittest.TestCase):
         self.assertEqual(payload["protocol"], "D2T2")
         self.assertEqual(payload["dc_load"]["voltage_v"], 12.35)
         self.assertEqual(payload["dc_load"]["current_a"], 3.2)
+        self.assertEqual(payload["dc_load"]["power_w"], 39.5)
+        self.assertIsNone(payload["dc_load"]["measured_count"])
 
         mqtt.ack(301)
         self.assertEqual(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Production-style launcher for the temporary Windows DJUA_SMS test gateway."""
+"""Production launcher for the DJUA_SMS gateway."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
+import signal
+import sys
 import threading
 import time
 
@@ -38,6 +40,63 @@ DEFAULT_CONFIG = ROOT / "config" / "gateway.env"
 DEFAULT_LOG = ROOT / "logs" / "gateway.log"
 DEFAULT_STOP_FILE = ROOT / "data" / "gateway.stop"
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def resolve_gateway_platform(
+    configured: str | None = None,
+    *,
+    system: str | None = None,
+) -> str:
+    """Resolve auto/windows/linux without coupling platform choice to GsmConfig."""
+
+    value = (
+        os.getenv("GATEWAY_PLATFORM", "auto")
+        if configured is None
+        else configured
+    ).strip().lower()
+    if value not in {"auto", "windows", "linux"}:
+        raise ValueError(
+            "GATEWAY_PLATFORM must be auto, windows or linux "
+            f"(got {value!r})"
+        )
+    if value != "auto":
+        return value
+
+    detected = sys.platform if system is None else system
+    if detected.startswith("win"):
+        return "windows"
+    if detected.startswith("linux"):
+        return "linux"
+    raise ValueError(
+        f"GATEWAY_PLATFORM=auto cannot resolve sys.platform={detected!r}; "
+        "set windows or linux"
+    )
+
+
+def validate_serial_port(serial_port: str, gateway_platform: str) -> None:
+    """Check that SERIAL_PORT matches the explicitly selected runtime OS."""
+
+    if gateway_platform == "windows":
+        is_com = re.fullmatch(r"COM\d+", serial_port, re.IGNORECASE) is not None
+        is_extended_com = (
+            serial_port.startswith("\\\\" + "." + "\\")
+            and re.fullmatch(r"COM\d+", serial_port[4:], re.IGNORECASE)
+            is not None
+        )
+        valid = is_com or is_extended_com
+    elif gateway_platform == "linux":
+        valid = serial_port.startswith("/dev/")
+    else:
+        raise ValueError(
+            f"unsupported GATEWAY_PLATFORM={gateway_platform!r}; "
+            "resolve it to windows or linux first"
+        )
+
+    if not valid:
+        raise ValueError(
+            f"SERIAL_PORT={serial_port} incompatible avec "
+            f"GATEWAY_PLATFORM={gateway_platform}"
+        )
 
 
 def load_env_file(path: str | Path, *, override: bool = False) -> dict[str, str]:
@@ -202,6 +261,31 @@ def build_gateway(
     )
 
 
+def _request_gateway_stop(gateway: DjuaSmsGateway) -> None:
+    gateway.stop()
+
+
+def _register_shutdown_signals(gateway: DjuaSmsGateway) -> None:
+    logger = logging.getLogger(__name__)
+
+    def handle_stop_signal(signum, _frame) -> None:
+        logger.info("GATEWAY_SIGNAL_STOP signal=%s", signum)
+        _request_gateway_stop(gateway)
+
+    for signal_name in ("SIGTERM", "SIGBREAK"):
+        signum = getattr(signal, signal_name, None)
+        if signum is None:
+            continue
+        try:
+            signal.signal(signum, handle_stop_signal)
+        except (ValueError, OSError) as exc:
+            logger.warning(
+                "GATEWAY_SIGNAL_HANDLER_NOT_REGISTERED signal=%s error=%s",
+                signal_name,
+                exc,
+            )
+
+
 def _start_stop_file_watcher(
     gateway: DjuaSmsGateway,
     stop_file: Path,
@@ -213,7 +297,7 @@ def _start_stop_file_watcher(
                     "GATEWAY_STOP_FILE_DETECTED path=%s",
                     stop_file,
                 )
-                gateway.stop()
+                _request_gateway_stop(gateway)
                 return
             time.sleep(0.5)
 
@@ -251,12 +335,15 @@ def main(argv=None) -> int:
         load_env_file(args.config)
         log_path = configure_logging()
         app, gsm, mqtt, security = load_runtime_configs()
+        gateway_platform = resolve_gateway_platform()
+        validate_serial_port(gsm.serial_port, gateway_platform)
     except Exception as exc:
         print(f"CONFIG_ERROR: {exc}")
         return 2
 
     if args.check_config:
         print("CONFIG_OK")
+        print(f"GATEWAY_PLATFORM={gateway_platform}")
         print(f"SERIAL_PORT={gsm.serial_port}")
         print(f"MQTT_HOST={mqtt.host}")
         print(f"MQTT_TOPIC_PREFIX={mqtt.normalized_topic_prefix}")
@@ -277,6 +364,7 @@ def main(argv=None) -> int:
     gateway: DjuaSmsGateway | None = None
     try:
         gateway = build_gateway(app, gsm, mqtt, security)
+        _register_shutdown_signals(gateway)
         _start_stop_file_watcher(gateway, stop_file)
 
         logger.info(

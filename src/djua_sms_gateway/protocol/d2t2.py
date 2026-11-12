@@ -67,7 +67,8 @@ D2T2_LAYOUT = (
     ("dc_power_raw", 18, True),
     ("dc_energy_raw", 26, True),
     ("flags", 16, False),
-    ("reserved_tail", 6, False),
+    ("dc_measured_count", 3, False),
+    ("reserved_tail", 3, False),
 )
 
 if sum(width for _, width, _ in D2T2_LAYOUT) != D2T2_PAYLOAD_BYTES * 8:
@@ -100,6 +101,7 @@ class D2T2Message:
     dc_load_current: float | None
     dc_load_power: float | None
     dc_load_energy_interval_wh: float | None
+    dc_load_measured_count: int | None
     flags: int
     auth: str
     payload: str = field(repr=False)
@@ -288,6 +290,12 @@ def parse_d2t2(raw_message: str) -> D2T2Message:
     _validate_auth_shape(auth)
     values = _decode_payload(payload)
 
+    _require_range(
+        values["dc_measured_count"],
+        "dc_load_measured_count",
+        0,
+        4,
+    )
     if values["reserved_tail"] != 0:
         raise D2ProtocolError(
             "D2T2_RESERVED_BITS",
@@ -321,6 +329,12 @@ def parse_d2t2(raw_message: str) -> D2T2Message:
     ac_energy_complete = bool(flags & 0x0040)
     dc_load_valid = bool(flags & 0x0080)
     dc_load_energy_complete = bool(flags & 0x0100)
+    if values["dc_measured_count"] > 0 and not dc_load_valid:
+        raise D2ProtocolError(
+            "FLAG_DEPENDENCY",
+            "DC measured count requires DC load valid",
+            "flags",
+        )
 
     if solar_energy_complete and not solar_valid:
         raise D2ProtocolError(
@@ -603,6 +617,11 @@ def parse_d2t2(raw_message: str) -> D2T2Message:
             if dc_load_energy_complete
             else None
         ),
+        dc_load_measured_count=(
+            None
+            if dc_load_valid and values["dc_measured_count"] == 0
+            else values["dc_measured_count"]
+        ),
         flags=flags,
         auth=auth,
         payload=payload,
@@ -713,20 +732,37 @@ def normalize_d2t2_to_backend(
                 else None
             ),
             "current_a": (
-                message.dc_load_current
+                round(
+                    message.dc_load_current * message.dc_load_measured_count,
+                    3,
+                )
                 if message.dc_load_valid
-                else None
+                and message.dc_load_measured_count not in (None, 0)
+                else (
+                    message.dc_load_current
+                    if message.dc_load_valid
+                    else None
+                )
             ),
             "power_w": (
-                message.dc_load_power
+                round(
+                    message.dc_load_power * message.dc_load_measured_count,
+                    1,
+                )
                 if message.dc_load_valid
-                else None
+                and message.dc_load_measured_count not in (None, 0)
+                else (
+                    message.dc_load_power
+                    if message.dc_load_valid
+                    else None
+                )
             ),
             "energy_interval_wh": (
                 message.dc_load_energy_interval_wh
                 if message.dc_load_energy_complete
                 else None
             ),
+            "measured_count": message.dc_load_measured_count,
         },
         "validity": {
             "rtc": message.rtc_valid,

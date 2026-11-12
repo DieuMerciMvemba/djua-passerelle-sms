@@ -1,3 +1,4 @@
+import base64
 import unittest
 
 from djua_sms_gateway.protocol.d2 import (
@@ -6,6 +7,7 @@ from djua_sms_gateway.protocol.d2 import (
     parse_d2,
 )
 from djua_sms_gateway.protocol.d2t2 import (
+    D2T2_LAYOUT,
     D2T2_PAYLOAD_BYTES,
     D2T2_PAYLOAD_CHARS,
     normalize_d2t2_to_backend,
@@ -40,6 +42,28 @@ D2T_LEGACY = (
 )
 
 
+def rewrite_d2t2_fields(raw_message, **updates):
+    protocol, device_id, payload, _auth = raw_message.split(",")
+    packed = int.from_bytes(
+        base64.urlsafe_b64decode(payload + "=="),
+        "big",
+    )
+    total_bits = D2T2_PAYLOAD_BYTES * 8
+    bit_offset = 0
+    for name, width, signed in D2T2_LAYOUT:
+        if name in updates:
+            value = updates[name]
+            if signed and value < 0:
+                value += 1 << width
+            shift = total_bits - bit_offset - width
+            mask = ((1 << width) - 1) << shift
+            packed = (packed & ~mask) | (value << shift)
+        bit_offset += width
+    encoded = packed.to_bytes(D2T2_PAYLOAD_BYTES, "big")
+    updated_payload = base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+    return f"{protocol},{device_id},{updated_payload},-"
+
+
 class D2T2ProtocolTests(unittest.TestCase):
     def test_dispatch_adds_d2t2_without_removing_existing_protocols(self):
         self.assertEqual(detect_protocol("D1,x"), "D1")
@@ -63,6 +87,7 @@ class D2T2ProtocolTests(unittest.TestCase):
         self.assertEqual(message.dc_load_current, 3.2)
         self.assertEqual(message.dc_load_power, 39.5)
         self.assertEqual(message.dc_load_energy_interval_wh, 19.76)
+        self.assertIsNone(message.dc_load_measured_count)
         self.assertTrue(message.dc_load_valid)
         self.assertTrue(message.dc_load_energy_complete)
 
@@ -92,8 +117,77 @@ class D2T2ProtocolTests(unittest.TestCase):
                 "current_a": 3.2,
                 "power_w": 39.5,
                 "energy_interval_wh": 19.76,
+                "measured_count": None,
             },
         )
+
+    def test_count_one_through_four_reconstructs_current_and_power(self):
+        expected = {
+            1: (3.2, 39.5),
+            2: (6.4, 79.0),
+            3: (9.6, 118.5),
+            4: (12.8, 158.0),
+        }
+        for count, (current, power) in expected.items():
+            with self.subTest(count=count):
+                message = parse_d2t2(
+                    rewrite_d2t2_fields(D2T2_TYPICAL, dc_measured_count=count)
+                )
+                self.assertEqual(message.dc_load_measured_count, count)
+                backend = normalize_d2t2_to_backend(
+                    message,
+                    gateway_received_at="2026-01-01T00:00:00+00:00",
+                    auth_status=D2AuthStatus.NOT_VERIFIED,
+                )
+                self.assertEqual(backend["dc_load"]["current_a"], current)
+                self.assertEqual(backend["dc_load"]["power_w"], power)
+                self.assertEqual(backend["dc_load"]["energy_interval_wh"], 19.76)
+
+    def test_legacy_dc_load_keeps_averages_and_null_count(self):
+        message = parse_d2t2(
+            rewrite_d2t2_fields(D2T2_TYPICAL, dc_measured_count=0)
+        )
+        self.assertIsNone(message.dc_load_measured_count)
+        backend = normalize_d2t2_to_backend(
+            message,
+            gateway_received_at="2026-01-01T00:00:00+00:00",
+            auth_status=D2AuthStatus.NOT_VERIFIED,
+        )
+        self.assertEqual(backend["dc_load"]["current_a"], 3.2)
+        self.assertEqual(backend["dc_load"]["power_w"], 39.5)
+        self.assertIsNone(backend["dc_load"]["measured_count"])
+
+    def test_count_five_is_rejected(self):
+        raw = rewrite_d2t2_fields(D2T2_TYPICAL, dc_measured_count=5)
+        with self.assertRaises(D2ProtocolError) as context:
+            parse_d2t2(raw)
+        self.assertEqual(context.exception.code, "OUT_OF_RANGE")
+
+    def test_nonzero_reserved_tail_is_rejected(self):
+        raw = rewrite_d2t2_fields(D2T2_TYPICAL, reserved_tail=1)
+        with self.assertRaises(D2ProtocolError) as context:
+            parse_d2t2(raw)
+        self.assertEqual(context.exception.code, "D2T2_RESERVED_BITS")
+
+    def test_positive_count_requires_dc_valid_flag(self):
+        raw = rewrite_d2t2_fields(
+            D2T2_TYPICAL, dc_measured_count=1, flags=0x007F
+        )
+        with self.assertRaises(D2ProtocolError) as context:
+            parse_d2t2(raw)
+        self.assertEqual(context.exception.code, "FLAG_DEPENDENCY")
+
+    def test_dc_energy_is_null_when_energy_flag_is_clear(self):
+        raw = rewrite_d2t2_fields(
+            D2T2_TYPICAL, flags=0x00FF, dc_energy_raw=0
+        )
+        message = parse_d2t2(raw)
+        backend = normalize_d2t2_to_backend(
+            message,
+            gateway_received_at="2026-01-01T00:00:00+00:00",
+            auth_status=D2AuthStatus.NOT_VERIFIED,
+        )
+        self.assertIsNone(backend["dc_load"]["energy_interval_wh"])
 
     def test_development_auth_dash_preserves_absence_as_null(self):
         message = parse_d2t2(D2T2_DEV_EMPTY)
@@ -103,6 +197,7 @@ class D2T2ProtocolTests(unittest.TestCase):
             key=None,
         )
         self.assertEqual(status, D2AuthStatus.NOT_VERIFIED)
+        self.assertEqual(message.dc_load_measured_count, 0)
         payload = normalize_d2t2_to_backend(
             message,
             gateway_received_at="2026-01-01T00:00:00+00:00",

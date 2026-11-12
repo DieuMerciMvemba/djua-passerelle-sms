@@ -103,6 +103,7 @@ class D2T2IngestionTests(unittest.TestCase):
                 "energy_interval_wh": 19.76,
                 "power_w": 39.5,
                 "voltage_v": 12.35,
+                "measured_count": None,
             },
         )
         self.assertTrue(payload["validity"]["dc_load"])

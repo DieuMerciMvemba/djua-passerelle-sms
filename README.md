@@ -237,3 +237,23 @@ Pour arrêter proprement la gateway sans CMD, double-cliquer sur \`stop_djua_gat
 Pour arrêter et retirer le démarrage automatique, double-cliquer sur \`disable_windows_test_autostart.bat\`.
 
 Les vrais secrets D2/MQTT restent uniquement dans \`config/gateway.env\`, qui est ignoré par Git.
+
+## Raspberry Pi 5
+
+Installation : `bash scripts/setup_pi5.sh`. Le script crée `.venv`, installe `requirements.txt`, prépare `config/`, `data/` et `logs/`, puis vérifie la configuration.
+
+Le modèle utilise `MQTT_HOST=CHANGE_ME` : renseignez l'hôte et les credentials dans `config/gateway.env`, puis relancez le script pour valider la configuration.
+
+Choisissez le port avec `SERIAL_PORT=/dev/ttyUSB0`, `/dev/serial/by-id/...` ou `/dev/serial0` pour l'UART GPIO ; `GATEWAY_PLATFORM=linux` active la validation Linux.
+
+Ajoutez l'utilisateur au groupe série si n?cessaire : `sudo usermod -aG dialout "$USER"`.
+
+```bash
+bash scripts/setup_pi5.sh --install-service
+sudo systemctl status djua-sms-gateway
+sudo systemctl restart djua-sms-gateway
+sudo systemctl stop djua-sms-gateway
+sudo journalctl -u djua-sms-gateway -f
+```
+
+Pour basculer entre Windows et Pi, copiez le bon exemple vers `config/gateway.env`, ou lancez `scripts/run_gateway.py --config <fichier-env>`.
