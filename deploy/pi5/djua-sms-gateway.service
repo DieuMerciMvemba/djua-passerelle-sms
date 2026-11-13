@@ -1,6 +1,6 @@
 [Unit]
-Description=DJUA SMS Gateway
-After=network-online.target
+Description=DJUA SMS Gateway Service (Production Daemon)
+After=network-online.target time-sync.target
 Wants=network-online.target
 
 [Service]
@@ -8,12 +8,14 @@ Type=simple
 User=__USER__
 WorkingDirectory=__ROOT__
 SupplementaryGroups=dialout
-ExecStart=__ROOT__/.venv/bin/python scripts/run_gateway.py --config config/gateway.env
+ExecStart=__PYTHON_BIN__ scripts/run_gateway.py --config config/gateway.env
 Environment=PYTHONPATH=__ROOT__/src:__ROOT__
 Restart=always
 RestartSec=5
 KillSignal=SIGTERM
 TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

@@ -849,17 +849,18 @@ Ne pas sauter directement au test complet.
 
 ## 38. Validation matérielle
 
-À ce stade :
-
 ```text
-TEST MOCK / SÉRIE SIMULÉ : EFFECTUÉ
-TEST SIM800L RÉEL          : NON EFFECTUÉ
-TEST SMS RÉEL              : NON EFFECTUÉ
+TEST MOCK / SÉRIE SIMULÉ       : EFFECTUÉ (269 tests unitaires et intégration OK)
+TEST MATÉRIEL SIM868 RÉEL      : EFFECTUÉ ET VALIDÉ (Raspberry Pi 5 + CP2102 + Orange RDC)
+TEST SMS RÉEL                  : PRÊT / EN PRODUCTION LOCALE
 ```
 
-L'environnement GitHub/ChatGPT ne possède pas le port COM physique du poste récepteur.
-
-Aucune validation matérielle n'est donc revendiquée.
+La validation matérielle a été confirmée sur poste physique Raspberry Pi 5 le 13/11/2026 :
+- Modem : SIMCOM SIM868 R14.18
+- Carte SIM : Orange RDC (63086), déverrouillée (READY)
+- Signal : RSSI 13-15/31 (~ -85 dBm)
+- Mode SMS : CMGF=1, mémoire SM
+- Détails complets : voir [hardware_pi5_sim868_validation.md](hardware_pi5_sim868_validation.md).
 
 ---
 

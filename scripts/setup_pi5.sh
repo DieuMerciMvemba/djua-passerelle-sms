@@ -33,7 +33,11 @@ PYTHONPATH="$ROOT/src:$ROOT${PYTHONPATH:+:$PYTHONPATH}" \
 if [[ "$INSTALL_SERVICE" == true ]]; then
     SERVICE_TMP="$(mktemp)"
     trap 'rm -f "$SERVICE_TMP"' EXIT
-    DJUA_SERVICE_USER="$SERVICE_USER" DJUA_SERVICE_ROOT="$ROOT" python3 - \
+    PYTHON_EXEC="$VENV_PYTHON"
+    if [[ ! -x "$PYTHON_EXEC" ]]; then
+        PYTHON_EXEC="$(command -v python3)"
+    fi
+    DJUA_SERVICE_USER="$SERVICE_USER" DJUA_SERVICE_ROOT="$ROOT" DJUA_SERVICE_PYTHON="$PYTHON_EXEC" python3 - \
         "$ROOT/deploy/pi5/djua-sms-gateway.service" > "$SERVICE_TMP" <<'PY'
 from pathlib import Path
 import os
@@ -42,6 +46,7 @@ import sys
 text = Path(sys.argv[1]).read_text(encoding="utf-8")
 text = text.replace("__USER__", os.environ["DJUA_SERVICE_USER"])
 text = text.replace("__ROOT__", os.environ["DJUA_SERVICE_ROOT"])
+text = text.replace("__PYTHON_BIN__", os.environ.get("DJUA_SERVICE_PYTHON", sys.executable))
 sys.stdout.write(text)
 PY
     sudo install -m 0644 "$SERVICE_TMP" /etc/systemd/system/djua-sms-gateway.service
