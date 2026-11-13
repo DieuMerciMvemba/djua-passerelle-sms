@@ -6,9 +6,10 @@ import sys
 import time
 from pathlib import Path
 
-# Ajouter src au PYTHONPATH
+# Ajouter src et le root du projet au PYTHONPATH
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from djua_sms_gateway.config import AppConfig, D2SecurityConfig
 from djua_sms_gateway.http.client import UrllibHttpClient
