@@ -9,6 +9,7 @@ from djua_sms_gateway.gsm.modem import Sim800Modem
 from djua_sms_gateway.gsm.serial_transport import SerialTransportError
 from djua_sms_gateway.gsm.sms_receiver import SmsReceiver
 from djua_sms_gateway.services.outbox_worker import MqttOutboxWorker
+from djua_sms_gateway.services.http_outbox_worker import HttpOutboxWorker
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class DjuaSmsGateway:
         sms_receiver: SmsReceiver,
         outbox_worker: MqttOutboxWorker | None = None,
         *,
+        http_outbox_worker: HttpOutboxWorker | None = None,
         reconnect_seconds: float = 5.0,
         sleep=time.sleep,
     ) -> None:
@@ -28,6 +30,7 @@ class DjuaSmsGateway:
         self.modem = modem
         self.sms_receiver = sms_receiver
         self.outbox_worker = outbox_worker
+        self.http_outbox_worker = http_outbox_worker
         self.reconnect_seconds = reconnect_seconds
         self._sleep = sleep
         self._started = False
@@ -46,6 +49,7 @@ class DjuaSmsGateway:
         *,
         gsm_poll_timeout_seconds: float = 0.0,
         mqtt_limit: int | None = None,
+        http_limit: int | None = None,
     ):
         if not self._started:
             self.startup()
@@ -62,7 +66,12 @@ class DjuaSmsGateway:
         mqtt_result = None
         if self.outbox_worker is not None:
             mqtt_result = self.outbox_worker.run_once(limit=mqtt_limit)
-        return receive_result, mqtt_result
+        http_result = None
+        if self.http_outbox_worker is not None:
+            http_result = self.http_outbox_worker.run_once(limit=http_limit)
+        if self.http_outbox_worker is None:
+            return receive_result, mqtt_result
+        return receive_result, mqtt_result, http_result
 
     def reconnect_modem(self):
         self._sleep(self.reconnect_seconds)
@@ -107,9 +116,12 @@ class DjuaSmsGateway:
 
     def shutdown(self) -> None:
         self.stop()
+        workers = [self.outbox_worker, self.http_outbox_worker]
         try:
             self.modem.close()
         finally:
-            if self.outbox_worker is not None:
-                self.outbox_worker.shutdown()
+            for worker in workers:
+                close = getattr(worker, "shutdown", None)
+                if callable(close):
+                    close()
         self._started = False

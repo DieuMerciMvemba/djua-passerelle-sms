@@ -65,6 +65,10 @@ CMGR
 
 CMGD n'attend pas MQTT.
 
+La sortie utilise MQTT par défaut, HTTP(S), ou les deux selon la configuration.
+HTTP reprend le JSON durable de l’outbox ; URL et en-têtes viennent du fichier d’environnement ([details](docs/http_transport.md)).
+Le contrat JSON du backend et sa compatibilité end-to-end restent à valider.
+
 ## Documentation
 
 - [Règles du projet](AGENTS.md)

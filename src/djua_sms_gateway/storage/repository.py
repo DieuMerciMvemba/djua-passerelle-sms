@@ -173,13 +173,55 @@ def _outbox_from_row(row: sqlite3.Row) -> OutboxRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         published_at=row["published_at"],
+        message_id=row["message_id"],
+        mqtt_done=bool(row["mqtt_done"]),
+        http_done=bool(row["http_done"]),
+        http_attempt_count=row["http_attempt_count"],
+        http_next_attempt_at=row["http_next_attempt_at"],
+        http_last_error=row["http_last_error"],
+        http_published_at=row["http_published_at"],
     )
 
 
 class SmsRepository:
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        backend_transport: str = "mqtt",
+    ) -> None:
+        if backend_transport not in {"mqtt", "http", "both"}:
+            raise ValueError("backend_transport must be mqtt, http or both")
         self.database = database
+        self.backend_transport = backend_transport
+        self.mqtt_enabled = backend_transport in {"mqtt", "both"}
+        self.http_enabled = backend_transport in {"http", "both"}
         self.database.initialize()
+
+    def _refresh_global_status(self, connection, outbox_id: int, now: str) -> None:
+        row = connection.execute(
+            "SELECT sms_id, mqtt_done, http_done FROM mqtt_outbox WHERE id = ?",
+            (outbox_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"outbox {outbox_id} not found")
+        complete = (not self.mqtt_enabled or bool(row["mqtt_done"])) and (
+            not self.http_enabled or bool(row["http_done"])
+        )
+        if complete:
+            connection.execute(
+                "UPDATE mqtt_outbox SET status = ?, updated_at = ? WHERE id = ?",
+                (OutboxStatus.PUBLISHED.value, now, outbox_id),
+            )
+            connection.execute(
+                "UPDATE inbound_sms SET status = ?, updated_at = ? WHERE id = ?",
+                (InboundStatus.PUBLISHED.value, now, row["sms_id"]),
+            )
+        else:
+            connection.execute(
+                "UPDATE mqtt_outbox SET status = ?, updated_at = ? WHERE id = ?",
+                (OutboxStatus.PENDING.value, now, outbox_id),
+            )
 
     def store_raw_sms(self, raw: RawSmsInput) -> StoreRawSmsResult:
         raw_key = compute_raw_dedupe_key(raw)
@@ -338,8 +380,9 @@ class SmsRepository:
                 """
                 INSERT INTO mqtt_outbox (
                     sms_id, topic, payload_json, qos, retain, status,
-                    attempt_count, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    attempt_count, mqtt_done, http_done, http_attempt_count,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 0, ?, ?)
                 """,
                 (
                     sms_id,
@@ -348,12 +391,16 @@ class SmsRepository:
                     qos,
                     int(retain),
                     OutboxStatus.PENDING.value,
+                    int(not self.mqtt_enabled),
+                    int(not self.http_enabled),
                     now,
                     now,
                 ),
             )
             row = connection.execute(
-                "SELECT * FROM mqtt_outbox WHERE id = ?", (cursor.lastrowid,)
+                """SELECT o.*, s.message_id FROM mqtt_outbox o
+                JOIN inbound_sms s ON s.id = o.sms_id WHERE o.id = ?""",
+                (cursor.lastrowid,),
             ).fetchone()
             return QueueResult(
                 QueueDisposition.QUEUED,
@@ -548,8 +595,9 @@ class SmsRepository:
                 """
                 INSERT INTO mqtt_outbox (
                     sms_id, topic, payload_json, qos, retain, status,
-                    attempt_count, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    attempt_count, mqtt_done, http_done, http_attempt_count,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 0, ?, ?)
                 """,
                 (
                     sms_id,
@@ -558,12 +606,15 @@ class SmsRepository:
                     qos,
                     int(retain),
                     OutboxStatus.PENDING.value,
+                    int(not self.mqtt_enabled),
+                    int(not self.http_enabled),
                     now,
                     now,
                 ),
             )
             row = connection.execute(
-                "SELECT * FROM mqtt_outbox WHERE id = ?",
+                """SELECT o.*, s.message_id FROM mqtt_outbox o
+                JOIN inbound_sms s ON s.id = o.sms_id WHERE o.id = ?""",
                 (cursor.lastrowid,),
             ).fetchone()
             return QueueResult(
@@ -597,7 +648,9 @@ class SmsRepository:
     def get_outbox(self, outbox_id: int) -> OutboxRecord | None:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM mqtt_outbox WHERE id = ?", (outbox_id,)
+                """SELECT o.*, s.message_id FROM mqtt_outbox o
+                JOIN inbound_sms s ON s.id = o.sms_id WHERE o.id = ?""",
+                (outbox_id,),
             ).fetchone()
         return _outbox_from_row(row) if row else None
 
@@ -607,12 +660,38 @@ class SmsRepository:
         limit: int | None = None,
         due_before: str | None = None,
     ) -> list[OutboxRecord]:
-        sql = "SELECT * FROM mqtt_outbox WHERE status = ?"
+        sql = """SELECT o.*, s.message_id FROM mqtt_outbox o
+                 JOIN inbound_sms s ON s.id = o.sms_id
+                 WHERE o.status = ? AND o.mqtt_done = 0"""
         params: list[object] = [OutboxStatus.PENDING.value]
         if due_before is not None:
-            sql += " AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
+            sql += " AND (o.next_attempt_at IS NULL OR o.next_attempt_at <= ?)"
             params.append(due_before)
-        sql += " ORDER BY id"
+        sql += " ORDER BY o.id"
+        if limit is not None:
+            if limit <= 0:
+                return []
+            sql += " LIMIT ?"
+            params.append(limit)
+
+        with self.database.connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [_outbox_from_row(row) for row in rows]
+
+    def list_pending_http_outbox(
+        self,
+        *,
+        limit: int | None = None,
+        due_before: str | None = None,
+    ) -> list[OutboxRecord]:
+        sql = """SELECT o.*, s.message_id FROM mqtt_outbox o
+                 JOIN inbound_sms s ON s.id = o.sms_id
+                 WHERE o.status = ? AND o.http_done = 0"""
+        params: list[object] = [OutboxStatus.PENDING.value]
+        if due_before is not None:
+            sql += " AND (o.http_next_attempt_at IS NULL OR o.http_next_attempt_at <= ?)"
+            params.append(due_before)
+        sql += " ORDER BY CASE WHEN o.topic LIKE '%/geofence/events' THEN 0 ELSE 1 END, o.id"
         if limit is not None:
             if limit <= 0:
                 return []
@@ -632,29 +711,79 @@ class SmsRepository:
         published_at = published_at or utc_now()
         with self.database.transaction(immediate=True) as connection:
             row = connection.execute(
-                "SELECT sms_id FROM mqtt_outbox WHERE id = ?", (outbox_id,)
+                "SELECT id FROM mqtt_outbox WHERE id = ?", (outbox_id,)
             ).fetchone()
             if row is None:
                 raise KeyError(f"outbox {outbox_id} not found")
             connection.execute(
-                """
-                UPDATE mqtt_outbox
-                SET status = ?, published_at = ?, updated_at = ?, last_error = NULL
-                WHERE id = ?
-                """,
-                (
-                    OutboxStatus.PUBLISHED.value,
-                    published_at,
-                    published_at,
-                    outbox_id,
-                ),
+                """UPDATE mqtt_outbox
+                SET mqtt_done = 1, http_done = CASE WHEN ? = 0 THEN 1 ELSE http_done END,
+                    published_at = ?, updated_at = ?, last_error = NULL
+                WHERE id = ?""",
+                (int(self.http_enabled), published_at, published_at, outbox_id),
             )
+            self._refresh_global_status(connection, outbox_id, published_at)
+            updated = connection.execute(
+                """SELECT o.*, s.message_id FROM mqtt_outbox o
+                JOIN inbound_sms s ON s.id = o.sms_id WHERE o.id = ?""",
+                (outbox_id,),
+            ).fetchone()
+            return _outbox_from_row(updated)
+
+    def mark_http_published(
+        self,
+        outbox_id: int,
+        *,
+        published_at: str | None = None,
+    ) -> OutboxRecord:
+        published_at = published_at or utc_now()
+        with self.database.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT id FROM mqtt_outbox WHERE id = ?", (outbox_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"outbox {outbox_id} not found")
             connection.execute(
-                "UPDATE inbound_sms SET status = ?, updated_at = ? WHERE id = ?",
-                (InboundStatus.PUBLISHED.value, published_at, row["sms_id"]),
+                """UPDATE mqtt_outbox
+                SET http_done = 1, mqtt_done = CASE WHEN ? = 0 THEN 1 ELSE mqtt_done END,
+                    http_published_at = ?, http_next_attempt_at = NULL,
+                    http_last_error = NULL, updated_at = ?
+                WHERE id = ?""",
+                (int(self.mqtt_enabled), published_at, published_at, outbox_id),
+            )
+            self._refresh_global_status(connection, outbox_id, published_at)
+            updated = connection.execute(
+                """SELECT o.*, s.message_id FROM mqtt_outbox o
+                JOIN inbound_sms s ON s.id = o.sms_id WHERE o.id = ?""",
+                (outbox_id,),
+            ).fetchone()
+            return _outbox_from_row(updated)
+
+    def record_http_failure(
+        self,
+        outbox_id: int,
+        *,
+        error: str,
+        next_attempt_at: str,
+    ) -> OutboxRecord:
+        now = utc_now()
+        with self.database.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT id FROM mqtt_outbox WHERE id = ?", (outbox_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"outbox {outbox_id} not found")
+            connection.execute(
+                """UPDATE mqtt_outbox
+                SET status = ?, http_attempt_count = http_attempt_count + 1,
+                    http_next_attempt_at = ?, http_last_error = ?, updated_at = ?
+                WHERE id = ?""",
+                (OutboxStatus.PENDING.value, next_attempt_at, error, now, outbox_id),
             )
             updated = connection.execute(
-                "SELECT * FROM mqtt_outbox WHERE id = ?", (outbox_id,)
+                """SELECT o.*, s.message_id FROM mqtt_outbox o
+                JOIN inbound_sms s ON s.id = o.sms_id WHERE o.id = ?""",
+                (outbox_id,),
             ).fetchone()
             return _outbox_from_row(updated)
 
@@ -689,7 +818,9 @@ class SmsRepository:
                     (InboundStatus.FAILED.value, now, row["sms_id"]),
                 )
             updated = connection.execute(
-                "SELECT * FROM mqtt_outbox WHERE id = ?", (outbox_id,)
+                """SELECT o.*, s.message_id FROM mqtt_outbox o
+                JOIN inbound_sms s ON s.id = o.sms_id WHERE o.id = ?""",
+                (outbox_id,),
             ).fetchone()
             return _outbox_from_row(updated)
 

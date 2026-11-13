@@ -4,7 +4,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.run_gateway import load_env_file, load_runtime_configs
+from djua_sms_gateway.config import (
+    AppConfig, D2SecurityConfig, GsmConfig, HttpConfig, MqttConfig,
+)
+from scripts.run_gateway import build_gateway, load_env_file, load_runtime_configs
 
 
 class RunGatewayConfigTests(unittest.TestCase):
@@ -97,6 +100,97 @@ class RunGatewayConfigTests(unittest.TestCase):
         self.assertEqual(mqtt.host, "broker.test.local")
         self.assertEqual(mqtt.normalized_topic_prefix, "djua/test")
         self.assertEqual(security.mode, "development")
+
+
+    def test_backend_transport_defaults_to_mqtt(self):
+        env = {
+            "SERIAL_PORT": "COM16",
+            "MQTT_HOST": "broker.test.local",
+            "D2_AUTH_MODE": "development",
+            "D2_HMAC_KEYS_JSON": "{}",
+            "D2_SENDER_BINDINGS_JSON": "{}",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            app, _gsm, _mqtt, _security = load_runtime_configs()
+        self.assertEqual(app.backend_transport, "mqtt")
+        self.assertIsNone(app.http)
+
+    def test_backend_transport_rejects_invalid_value(self):
+        with patch.dict(os.environ, {"BACKEND_TRANSPORT": "ftp"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "BACKEND_TRANSPORT must be"):
+                load_runtime_configs()
+
+    def test_http_mode_does_not_require_or_validate_mqtt_host(self):
+        env = {
+            "SERIAL_PORT": "COM16",
+            "BACKEND_TRANSPORT": "http",
+            "HTTP_BACKEND_URL": "https://backend.invalid/full/route",
+            "MQTT_HOST": "CHANGE_ME",
+            "D2_AUTH_MODE": "development",
+            "D2_HMAC_KEYS_JSON": "{}",
+            "D2_SENDER_BINDINGS_JSON": "{}",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            app, _gsm, mqtt, _security = load_runtime_configs()
+        self.assertEqual(app.backend_transport, "http")
+        self.assertEqual(mqtt.host, "CHANGE_ME")
+        self.assertEqual(app.http.backend_url, "https://backend.invalid/full/route")
+        self.assertEqual(app.http.timeout_seconds, 5)
+        self.assertEqual(app.http.batch_limit, 10)
+
+    def test_http_mode_requires_backend_url(self):
+        env = {
+            "SERIAL_PORT": "COM16",
+            "BACKEND_TRANSPORT": "http",
+            "D2_AUTH_MODE": "development",
+            "D2_HMAC_KEYS_JSON": "{}",
+            "D2_SENDER_BINDINGS_JSON": "{}",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(ValueError, "HTTP_BACKEND_URL is required"):
+                load_runtime_configs()
+
+    def test_http_extra_headers_must_be_valid_json_object(self):
+        env = {
+            "SERIAL_PORT": "COM16",
+            "BACKEND_TRANSPORT": "both",
+            "HTTP_BACKEND_URL": "https://backend.invalid/full/route",
+            "HTTP_EXTRA_HEADERS_JSON": "[1,2]",
+            "MQTT_HOST": "broker.test.local",
+            "D2_AUTH_MODE": "development",
+            "D2_HMAC_KEYS_JSON": "{}",
+            "D2_SENDER_BINDINGS_JSON": "{}",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(ValueError, "HTTP_EXTRA_HEADERS_JSON"):
+                load_runtime_configs()
+
+    def test_http_only_build_does_not_create_mqtt_objects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = AppConfig(
+                database_path=str(Path(tmp) / "gateway.db"),
+                backend_transport="http",
+                http=HttpConfig("https://backend.invalid/full/route"),
+            )
+            with (
+                patch("scripts.run_gateway.PySerialTransport"),
+                patch("scripts.run_gateway.AtProtocol"),
+                patch("scripts.run_gateway.Sim800Modem"),
+                patch("scripts.run_gateway.SmsReceiver"),
+                patch("scripts.run_gateway.SmsIngestionService"),
+                patch("scripts.run_gateway.PahoMqttClient") as mqtt_client,
+                patch("scripts.run_gateway.MqttPublisher") as mqtt_publisher,
+            ):
+                gateway = build_gateway(
+                    app,
+                    GsmConfig(serial_port="COM16"),
+                    MqttConfig(host=""),
+                    D2SecurityConfig(),
+                )
+            self.assertIsNone(gateway.outbox_worker)
+            self.assertIsNotNone(gateway.http_outbox_worker)
+            mqtt_client.assert_not_called()
+            mqtt_publisher.assert_not_called()
 
 
 class WindowsAutomationAssetsTests(unittest.TestCase):

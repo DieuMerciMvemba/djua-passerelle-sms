@@ -21,6 +21,7 @@ from djua_sms_gateway.config import (
     MqttConfig,
 )
 from djua_sms_gateway.gsm.at_protocol import AtProtocol
+from djua_sms_gateway.http.client import UrllibHttpClient
 from djua_sms_gateway.gsm.modem import Sim800Modem
 from djua_sms_gateway.gsm.serial_transport import PySerialTransport
 from djua_sms_gateway.gsm.sms_receiver import SmsReceiver
@@ -32,6 +33,7 @@ from djua_sms_gateway.services.ingestion import (
     SmsIngestionService,
 )
 from djua_sms_gateway.services.outbox_worker import MqttOutboxWorker
+from djua_sms_gateway.services.http_outbox_worker import HttpOutboxWorker
 from djua_sms_gateway.storage import Database, SmsRepository
 
 
@@ -185,24 +187,26 @@ def configure_logging() -> Path:
 def load_runtime_configs():
     app = AppConfig.from_env()
     gsm = GsmConfig.from_env()
-    mqtt = MqttConfig.from_env()
+    mqtt_enabled = app.backend_transport in {"mqtt", "both"}
+    mqtt = MqttConfig.from_env(require_host=mqtt_enabled)
     security = D2SecurityConfig.from_env()
 
-    host = mqtt.host.strip()
-    if host.upper() in {
-        "CHANGE_ME",
-        "TODO",
-        "BROKER_A_CONFIGURER",
-    }:
-        raise ValueError(
-            "MQTT_HOST still contains a placeholder; edit config/gateway.env"
-        )
-    if host.isdigit():
-        raise ValueError(
-            "MQTT_HOST looks like a port number. Put the broker address "
-            "in MQTT_HOST (for example 127.0.0.1 or a hostname) and the "
-            "port in MQTT_PORT."
-        )
+    if mqtt_enabled:
+        host = mqtt.host.strip()
+        if host.upper() in {
+            "CHANGE_ME",
+            "TODO",
+            "BROKER_A_CONFIGURER",
+        }:
+            raise ValueError(
+                "MQTT_HOST still contains a placeholder; edit config/gateway.env"
+            )
+        if host.isdigit():
+            raise ValueError(
+                "MQTT_HOST looks like a port number. Put the broker address "
+                "in MQTT_HOST (for example 127.0.0.1 or a hostname) and the "
+                "port in MQTT_PORT."
+            )
 
     return app, gsm, mqtt, security
 
@@ -217,7 +221,10 @@ def build_gateway(
     if not database_path.is_absolute():
         database_path = ROOT / database_path
 
-    repository = SmsRepository(Database(database_path))
+    repository = SmsRepository(
+        Database(database_path),
+        backend_transport=app.backend_transport,
+    )
 
     serial_transport = PySerialTransport(gsm)
     at = AtProtocol(
@@ -243,21 +250,34 @@ def build_gateway(
     )
     receiver = SmsReceiver(modem, ingestion)
 
-    mqtt_client = PahoMqttClient(mqtt)
-    publisher = MqttPublisher(
-        mqtt_client,
-        repository,
-        publish_timeout_seconds=mqtt.publish_timeout_seconds,
-        retry_base_seconds=mqtt.retry_base_seconds,
-        retry_max_seconds=mqtt.retry_max_seconds,
-    )
-    worker = MqttOutboxWorker(repository, mqtt_client, publisher)
+    worker = None
+    if app.backend_transport in {"mqtt", "both"}:
+        mqtt_client = PahoMqttClient(mqtt)
+        publisher = MqttPublisher(
+            mqtt_client,
+            repository,
+            publish_timeout_seconds=mqtt.publish_timeout_seconds,
+            retry_base_seconds=mqtt.retry_base_seconds,
+            retry_max_seconds=mqtt.retry_max_seconds,
+        )
+        worker = MqttOutboxWorker(repository, mqtt_client, publisher)
+
+    http_worker = None
+    if app.backend_transport in {"http", "both"}:
+        if app.http is None:
+            raise ValueError("HTTP configuration is required for this transport mode")
+        http_client = UrllibHttpClient(
+            timeout_seconds=app.http.timeout_seconds,
+            verify_tls=app.http.verify_tls,
+        )
+        http_worker = HttpOutboxWorker(repository, http_client, app.http)
 
     return DjuaSmsGateway(
         modem,
         receiver,
         worker,
         reconnect_seconds=gsm.reconnect_seconds,
+        http_outbox_worker=http_worker,
     )
 
 
@@ -345,7 +365,9 @@ def main(argv=None) -> int:
         print("CONFIG_OK")
         print(f"GATEWAY_PLATFORM={gateway_platform}")
         print(f"SERIAL_PORT={gsm.serial_port}")
-        print(f"MQTT_HOST={mqtt.host}")
+        print(f"BACKEND_TRANSPORT={app.backend_transport}")
+        if app.backend_transport in {"mqtt", "both"}:
+            print(f"MQTT_HOST={mqtt.host}")
         print(f"MQTT_TOPIC_PREFIX={mqtt.normalized_topic_prefix}")
         print(f"D2_AUTH_MODE={security.mode}")
         print(f"DATABASE_PATH={app.database_path}")

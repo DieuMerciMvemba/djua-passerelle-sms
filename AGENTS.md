@@ -21,7 +21,7 @@ normalisation
       ↓
 MQTT outbox persistante
       ↓
-publication MQTT
+publication MQTT et/ou HTTP
 ```
 
 `DJUA_SMS` n'est pas :

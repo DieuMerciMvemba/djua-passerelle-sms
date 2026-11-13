@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import json
 import os
 import re
+from urllib.parse import urlsplit
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -222,11 +223,11 @@ class MqttConfig:
     retry_max_seconds: float = 300.0
     tls: bool = False
 
-    def validate(self) -> "MqttConfig":
+    def validate(self, *, require_host: bool = True) -> "MqttConfig":
         host = self.host.strip()
         client_id = self.client_id.strip()
         prefix = self.topic_prefix.strip().strip("/")
-        if not host:
+        if require_host and not host:
             raise ValueError("MQTT_HOST must not be empty")
         if not 1 <= self.port <= 65535:
             raise ValueError("MQTT_PORT must be between 1 and 65535")
@@ -273,7 +274,7 @@ class MqttConfig:
         return self.topic_prefix.strip().strip("/")
 
     @classmethod
-    def from_env(cls) -> "MqttConfig":
+    def from_env(cls, *, require_host: bool = True) -> "MqttConfig":
         username = os.getenv("MQTT_USERNAME") or None
         password = os.getenv("MQTT_PASSWORD") or None
         config = cls(
@@ -313,18 +314,120 @@ class MqttConfig:
             ),
             tls=_env_bool("MQTT_TLS", False),
         )
-        return config.validate()
+        return config.validate(require_host=require_host)
+
+
+@dataclass(frozen=True)
+class HttpConfig:
+    backend_url: str
+    events_url: str | None = None
+    auth_token: str | None = field(default=None, repr=False)
+    extra_headers: dict[str, str] = field(default_factory=dict, repr=False)
+    timeout_seconds: float = 5.0
+    verify_tls: bool = True
+    retry_base_seconds: float = 2.0
+    retry_max_seconds: float = 300.0
+    batch_limit: int = 10
+
+    @staticmethod
+    def _validate_url(name: str, value: str) -> str:
+        try:
+            parsed = urlsplit(value.strip())
+            parsed.port
+        except ValueError as exc:
+            raise ValueError(
+                f"{name} must be a complete http:// or https:// URL"
+            ) from exc
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ValueError(
+                f"{name} must be a complete http:// or https:// URL"
+            )
+        return value.strip()
+
+    def validate(self) -> "HttpConfig":
+        self._validate_url("HTTP_BACKEND_URL", self.backend_url)
+        if self.events_url:
+            self._validate_url("HTTP_EVENTS_URL", self.events_url)
+        if self.timeout_seconds <= 0:
+            raise ValueError("HTTP_TIMEOUT_SECONDS must be > 0")
+        if self.retry_base_seconds <= 0:
+            raise ValueError("HTTP_RETRY_BASE_SECONDS must be > 0")
+        if self.retry_max_seconds < self.retry_base_seconds:
+            raise ValueError(
+                "HTTP_RETRY_MAX_SECONDS must be >= HTTP_RETRY_BASE_SECONDS"
+            )
+        if self.batch_limit <= 0:
+            raise ValueError("HTTP_BATCH_LIMIT must be > 0")
+        for name, value in self.extra_headers.items():
+            if (
+                not isinstance(name, str)
+                or not name.strip()
+                or not isinstance(value, str)
+                or any(char in name + value for char in "\r\n")
+            ):
+                raise ValueError(
+                    "HTTP_EXTRA_HEADERS_JSON must map header names to string values"
+                )
+        return self
+
+    @classmethod
+    def from_env(cls) -> "HttpConfig":
+        backend_url = os.getenv("HTTP_BACKEND_URL", "").strip()
+        if not backend_url:
+            raise ValueError(
+                "HTTP_BACKEND_URL is required when BACKEND_TRANSPORT includes http"
+            )
+        raw_headers = os.getenv("HTTP_EXTRA_HEADERS_JSON", "{}").strip() or "{}"
+        try:
+            headers = json.loads(raw_headers)
+        except json.JSONDecodeError as exc:
+            raise ValueError("HTTP_EXTRA_HEADERS_JSON must be a JSON object") from exc
+        if not isinstance(headers, dict) or not all(
+            isinstance(name, str) and isinstance(value, str)
+            for name, value in headers.items()
+        ):
+            raise ValueError(
+                "HTTP_EXTRA_HEADERS_JSON must be a JSON object of string values"
+            )
+        return cls(
+            backend_url=backend_url,
+            events_url=os.getenv("HTTP_EVENTS_URL", "").strip() or None,
+            auth_token=os.getenv("HTTP_AUTH_TOKEN", "") or None,
+            extra_headers=headers,
+            timeout_seconds=_env_float("HTTP_TIMEOUT_SECONDS", 5.0),
+            verify_tls=_env_bool("HTTP_VERIFY_TLS", True),
+            retry_base_seconds=_env_float("HTTP_RETRY_BASE_SECONDS", 2.0),
+            retry_max_seconds=_env_float("HTTP_RETRY_MAX_SECONDS", 300.0),
+            batch_limit=_env_int("HTTP_BATCH_LIMIT", 10),
+        ).validate()
 
 
 @dataclass(frozen=True)
 class AppConfig:
     database_path: str = "data/djua_sms_gateway.db"
+    backend_transport: str = "mqtt"
+    http: HttpConfig | None = None
 
     @classmethod
     def from_env(cls) -> "AppConfig":
+        transport = os.getenv("BACKEND_TRANSPORT", "mqtt").strip().lower()
+        if transport not in {"mqtt", "http", "both"}:
+            raise ValueError(
+                "BACKEND_TRANSPORT must be mqtt, http or both "
+                f"(got {transport!r})"
+            )
+        http = HttpConfig.from_env() if transport in {"http", "both"} else None
         return cls(
             database_path=os.getenv(
                 "DATABASE_PATH",
                 "data/djua_sms_gateway.db",
-            )
+            ),
+            backend_transport=transport,
+            http=http,
         )

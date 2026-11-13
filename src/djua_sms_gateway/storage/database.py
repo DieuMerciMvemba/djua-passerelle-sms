@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 from typing import Iterator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS mqtt_outbox (
     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
     next_attempt_at TEXT NULL,
     last_error TEXT NULL,
+    mqtt_done INTEGER NOT NULL DEFAULT 0 CHECK (mqtt_done IN (0,1)),
+    http_done INTEGER NOT NULL DEFAULT 0 CHECK (http_done IN (0,1)),
+    http_attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (http_attempt_count >= 0),
+    http_next_attempt_at TEXT NULL,
+    http_last_error TEXT NULL,
+    http_published_at TEXT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     published_at TEXT NULL,
@@ -70,6 +76,8 @@ CREATE INDEX IF NOT EXISTS idx_inbound_sms_message_id
     ON inbound_sms(message_id);
 CREATE INDEX IF NOT EXISTS idx_outbox_status_next_attempt
     ON mqtt_outbox(status, next_attempt_at, id);
+CREATE INDEX IF NOT EXISTS idx_http_outbox_due
+    ON mqtt_outbox(http_done, http_next_attempt_at, id);
 """
 
 _MIGRATION_V1_TO_V2 = (
@@ -79,6 +87,17 @@ _MIGRATION_V1_TO_V2 = (
     "ALTER TABLE inbound_sms ADD COLUMN security_status TEXT NULL",
     "ALTER TABLE inbound_sms ADD COLUMN conflict_with_sms_id INTEGER NULL",
     "CREATE INDEX IF NOT EXISTS idx_inbound_sms_message_id ON inbound_sms(message_id)",
+)
+
+_MIGRATION_V2_TO_V3 = (
+    "ALTER TABLE mqtt_outbox ADD COLUMN mqtt_done INTEGER NOT NULL DEFAULT 0 CHECK (mqtt_done IN (0,1))",
+    "ALTER TABLE mqtt_outbox ADD COLUMN http_done INTEGER NOT NULL DEFAULT 0 CHECK (http_done IN (0,1))",
+    "ALTER TABLE mqtt_outbox ADD COLUMN http_attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (http_attempt_count >= 0)",
+    "ALTER TABLE mqtt_outbox ADD COLUMN http_next_attempt_at TEXT NULL",
+    "ALTER TABLE mqtt_outbox ADD COLUMN http_last_error TEXT NULL",
+    "ALTER TABLE mqtt_outbox ADD COLUMN http_published_at TEXT NULL",
+    "UPDATE mqtt_outbox SET mqtt_done = CASE WHEN status = 'PUBLISHED' THEN 1 ELSE 0 END",
+    "UPDATE mqtt_outbox SET http_done = CASE WHEN status = 'PUBLISHED' THEN 1 ELSE 0 END",
 )
 
 
@@ -123,6 +142,11 @@ class Database:
 
             if current_version == 1:
                 for statement in _MIGRATION_V1_TO_V2:
+                    connection.execute(statement)
+                current_version = 2
+
+            if current_version == 2:
+                for statement in _MIGRATION_V2_TO_V3:
                     connection.execute(statement)
                 connection.execute(
                     f"PRAGMA user_version = {SCHEMA_VERSION}"

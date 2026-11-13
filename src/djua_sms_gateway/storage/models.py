@@ -1,4 +1,4 @@
-"""Persistence models for inbound SMS messages and the MQTT outbox."""
+"""Persistence models for inbound SMS messages and transport outboxes."""
 
 from __future__ import annotations
 
@@ -80,6 +80,13 @@ class OutboxRecord:
     created_at: str
     updated_at: str
     published_at: str | None
+    message_id: str | None = None
+    mqtt_done: bool = False
+    http_done: bool = False
+    http_attempt_count: int = 0
+    http_next_attempt_at: str | None = None
+    http_last_error: str | None = None
+    http_published_at: str | None = None
 
 
 @dataclass(frozen=True)

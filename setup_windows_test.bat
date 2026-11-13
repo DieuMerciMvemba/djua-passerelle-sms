@@ -35,7 +35,8 @@ if not exist "config\gateway.env" (
     echo.
     echo Le fichier de configuration va s'ouvrir.
     echo COM16 et le mode D2 development sont deja proposes.
-    echo Renseignez surtout MQTT_HOST et les identifiants MQTT si necessaires.
+    echo Pour MQTT/both, renseignez MQTT_HOST et les identifiants necessaires.
+    echo Pour HTTP seul, renseignez BACKEND_TRANSPORT=http et HTTP_BACKEND_URL.
     echo Enregistrez puis FERMEZ le Bloc-notes pour continuer.
     echo.
     start /wait notepad.exe "config\gateway.env"
