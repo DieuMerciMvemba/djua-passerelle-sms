@@ -55,6 +55,7 @@ def decoded(message):
             "current_a": message.dc_load_current,
             "power_w": message.dc_load_power,
             "energy_interval_wh": message.dc_load_energy_interval_wh,
+            "measured_count": message.dc_load_measured_count,
         },
         "flags": message.flags,
     }
