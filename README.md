@@ -1,73 +1,177 @@
-# DJUA_SMS
+# DJUA_SMS — Passerelle de Télémétrie SMS (GSM -> SQLite -> HTTP / MQTT)
 
-Passerelle **SMS -> SQLite -> MQTT** du projet DJUA.
+Passerelle légère de télémétrie développée pour le projet **DJUA ENERGY** (Orange Énergie RDC).
+Elle assure la réception des SMS émis par les boîtiers solaires IoT, leur persistance locale sans perte, leur normalisation conforme aux contrats d'interface, et leur transmission automatique vers le Backend Cloud (**HTTP REST** et/ou **MQTT**).
 
 ## Règle absolue
 
-Le dépôt :
+Le dépôt `DJUA` reste **READ ONLY**.  
+Toutes les implémentations de la gateway et de la chaîne de transport sont réalisées dans `DJUA_SMS`.
+
+## Architecture du flux
 
 ```text
-toussaintmadimba-cmyk/DJUA
-```
-
-reste **READ ONLY**.
-
-Toutes les implémentations de la gateway sont réalisées uniquement dans :
-
-```text
-toussaintmadimba-cmyk/DJUA_SMS
-```
-
-## Architecture
-
-```text
-SIM868 récepteur (pilote historique SIM800)
-    |
-    v
-pyserial
-    |
-    v
-AT protocol
-    |
-    v
-+CMTI / CMGR
-    |
-    v
-SmsReceiver
-    |
-    v
+Boîtier IoT Solaire (ESP32 + SIM800C)
+      |
+      | SMS GSM-7 (D2T2 / D2E)
+      v
+SIM868 récepteur (sur Raspberry Pi 5 ou PC Windows)
+      |
+      v
+PySerialTransport / Commandes AT (+CMTI -> CMGR)
+      |
+      v
 SmsIngestionService
-    |
-    +--> SQLite inbound_sms
-    +--> déduplication
-    +--> dispatch D1 / D2T / D2T2 / D2E
-    +--> parsing / validation / sécurité
-    +--> normalisation backend
-    +--> mqtt_outbox PENDING
-    |
-    v
-MqttOutboxWorker
-    |
-    v
-MQTT QoS 1 / PUBACK
-    |
-    v
-backend DJUA
+      |
+      +--> SQLite inbound_sms (COMMIT durable)
+      +--> Déduplication et anti-rejeu (sequence / message_id)
+      +--> Validation & vérification HMAC-SHA256
+      +--> Normalisation JSON (contrat D2T2 / D2E)
+      +--> Insertion dans mqtt_outbox (statut PENDING)
+      |
+      v (seulement après persistance SQLite)
+Suppression sécurisée du SMS sur SIM (CMGD=<index>)
+      |
+      +-------------------------------------------+
+      |                                           |
+      v                                           v
+[HTTP Outbox Worker]                     [MQTT Outbox Worker]
+      |                                           |
+      v (POST JSON 2xx)                           v (QoS 1 / PUBACK)
+Backend Render (DJUA Cloud)               Broker MQTT
+https://djua-energy-backend.onrender.com
 ```
 
-La règle de non-perte côté modem est :
+## Règle critique de non-perte
 
 ```text
 CMGR
--> SQLite COMMIT durable
--> seulement ensuite CMGD=<index>
+ -> SQLite COMMIT durable
+ -> seulement ensuite CMGD=<index>
 ```
 
-CMGD n'attend pas MQTT.
+Le SMS n'est **jamais** supprimé de la mémoire SIM tant que son écriture brute sur disque (SQLite) n'est pas acquittée.
 
-La sortie utilise MQTT par défaut, HTTP(S), ou les deux selon la configuration.
-HTTP reprend le JSON durable de l’outbox ; URL et en-têtes viennent du fichier d’environnement ([details](docs/http_transport.md)).
-Le contrat JSON du backend et sa compatibilité end-to-end restent à valider.
+## Modes de Transport Backend (`BACKEND_TRANSPORT`)
+
+Le transport est sélectionné par la variable `BACKEND_TRANSPORT` dans le `.env` :
+
+1. **`http`** (Recommandé pour déploiement direct Cloud sans broker) :
+   - Exécute des requêtes `POST` directes vers l'API Backend.
+   - Endpoint télémétrie : `POST /api/iot/telemetry`.
+   - Endpoint alertes urgentes geofence : `POST /api/iot/alerts`.
+   - En-têtes : `Content-Type: application/json`, `x-device-token: djua`, `X-DJUA-Topic`, `Idempotency-Key`.
+   - Retries automatiques avec backoff exponentiel en cas d'erreur réseau / serveur (codes 5xx ou 429).
+2. **`mqtt`** (Transport historique) :
+   - Publication QoS 1 avec écoute du `PUBACK` vers le broker MQTT.
+3. **`both`** :
+   - Double diffusion simultanée HTTP + MQTT avec suivi d'état indépendant pour chaque protocole.
+
+## Format Télémétrique JSON final émis vers le Backend
+
+Lorsqu'un SMS D2T2 est reçu et normalisé, le corps JSON suivant est transmis au Backend :
+
+```json
+{
+  "kit_id": "DJUA-KIN-000001",
+  "protocol": "D2T2",
+  "sequence": 12345,
+  "message_id": "D2:DJUA-KIN-000001:9IX",
+  "uptime_ms": 123456789,
+  "timestamp_ms": 123456789,
+  "interval_seconds": 1800,
+  "timestamp": "2026-09-27T16:30:00+01:00",
+  "timezone": "GMT+1",
+  "gateway_received_at": "2026-11-13T14:33:39.678995+00:00",
+  "auth_status": "VERIFIED",
+
+  "latitude": -4.3251,
+  "longitude": 15.3222,
+
+  "battery": {
+    "voltage_v": 12.4,
+    "current_a": 0.5,
+    "power_w": 6.2
+  },
+
+  "solar": {
+    "voltage_v": 18.2,
+    "current_a": 1.23,
+    "power_w": 22.4,
+    "energy_interval_wh": 11.2
+  },
+
+  "dc_load": {
+    "voltage_v": 12.35,
+    "current_a": 6.4,
+    "power_w": 79.0,
+    "energy_interval_wh": 19.76,
+    "measured_count": 2
+  },
+
+  "ac_load": {
+    "voltage_v": 230.1,
+    "current_a": 1.25,
+    "active_power_w": 244.5,
+    "apparent_power_va": 287.6,
+    "energy_interval_wh": 122.25
+  },
+
+  "validity": {
+    "rtc": true,
+    "gps": true,
+    "battery": true,
+    "solar": true,
+    "solar_energy": true,
+    "dc_load": true,
+    "dc_load_energy": true,
+    "ac": true,
+    "ac_energy": true
+  }
+}
+```
+
+## Démarrage et Tests
+
+### 1. Installation
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+### 2. Configuration d'environnement
+
+Copier `.env` ou `config/gateway.env` et renseigner les paramètres du modem et du backend :
+- `SERIAL_PORT` (`COM16` sous Windows, `/dev/ttyUSB0` sous Linux / Pi 5)
+- `BACKEND_TRANSPORT=http`
+- `HTTP_BACKEND_URL=https://djua-energy-backend.onrender.com/api/iot/telemetry`
+- `HTTP_EVENTS_URL=https://djua-energy-backend.onrender.com/api/iot/alerts`
+- `HTTP_EXTRA_HEADERS_JSON={"x-device-token": "djua"}`
+
+### 3. Test d'envoi Passerelle -> Backend (sans modem physique)
+
+Un script d'intégration de bout en bout est disponible pour tester la chaîne complète :
+```bash
+python scripts/test_gateway_to_backend.py
+```
+
+### 4. Lancement de la Passerelle en continu
+
+- **Sous Windows** :
+  ```bash
+  start_djua_gateway.bat
+  ```
+- **Sous Raspberry Pi 5** :
+  ```bash
+  sudo systemctl start djua-sms-gateway.service
+  ```
+
+### 5. Suite de Tests Automatisés
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
+Couvre 269 tests unitaires et d'intégration (conformité D1/D2/D2T2, cryptographie HMAC, migrations SQLite, workers HTTP et MQTT).
 
 ## Documentation
 
