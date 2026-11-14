@@ -1,4 +1,4 @@
-"""SIM800L modem operations above the generic AT protocol."""
+"""Opérations de haut niveau sur le modem SIM800L / SIM868 via commandes AT."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# Seuil d'alerte de saturation de la mémoire SMS (80%)
 SMS_STORAGE_WARNING_RATIO = 0.80
 
 _CMTI_RE = re.compile(r'^\+CMTI:\s*"([^"]+)"\s*,\s*(\d+)\s*$')
@@ -30,22 +31,27 @@ _STORAGE_RE = re.compile(r"^[A-Za-z0-9]{1,8}$")
 
 
 class ModemError(RuntimeError):
+    """Classe de base pour les erreurs relatives au modem GSM."""
     pass
 
 
 class ModemCommandError(ModemError):
+    """Levée lorsqu'une commande AT obligatoire retourne ERROR."""
     pass
 
 
 class ModemInitializationError(ModemError):
+    """Levée lors d'un échec de détection ou de configuration initiale du modem."""
     pass
 
 
 def _csv_fields(text: str) -> list[str]:
+    """Découpe une ligne au format CSV en respectant les chaînes entre guillemets."""
     return next(csv.reader(io.StringIO(text), skipinitialspace=True))
 
 
 def parse_cmti(line: str) -> CmtiNotification:
+    """Analyse une notification +CMTI indiquant le stockage et l'index du SMS reçu."""
     match = _CMTI_RE.fullmatch(line.strip())
     if match is None:
         raise ValueError("malformed +CMTI notification")
@@ -53,6 +59,7 @@ def parse_cmti(line: str) -> CmtiNotification:
 
 
 def parse_sim_status(lines: tuple[str, ...]) -> SimStatus:
+    """Analyse la réponse +CPIN? pour déterminer l'état de la carte SIM."""
     for line in lines:
         if line.startswith("+CPIN:"):
             value = line.split(":", 1)[1].strip()
@@ -67,6 +74,7 @@ def parse_sim_status(lines: tuple[str, ...]) -> SimStatus:
 
 
 def parse_network_registration(lines: tuple[str, ...]) -> NetworkRegistration:
+    """Analyse la réponse +CREG? pour déterminer l'état d'attachement au réseau."""
     for line in lines:
         match = _CREG_RE.fullmatch(line)
         if match:
@@ -83,6 +91,7 @@ def parse_network_registration(lines: tuple[str, ...]) -> NetworkRegistration:
 
 
 def parse_signal_quality(lines: tuple[str, ...]) -> SignalQuality | None:
+    """Analyse la réponse +CSQ pour extraire le RSSI et le taux d'erreur binaire BER."""
     for line in lines:
         match = _CSQ_RE.fullmatch(line)
         if match:
@@ -91,6 +100,7 @@ def parse_signal_quality(lines: tuple[str, ...]) -> SignalQuality | None:
 
 
 def parse_storage(lines: tuple[str, ...], known_name: str | None = None) -> SmsStorage | None:
+    """Extrait l'état de remplissage de la mémoire SMS depuis +CPMS."""
     for line in lines:
         if not line.startswith("+CPMS:"):
             continue
@@ -107,6 +117,7 @@ def parse_storage(lines: tuple[str, ...], known_name: str | None = None) -> SmsS
 
 
 def _log_storage(storage: SmsStorage) -> None:
+    """Journalise l'occupation mémoire avec avertissement si seuil dépassé."""
     ratio = storage.used / storage.total if storage.total > 0 else 0.0
     log = logger.warning if ratio >= SMS_STORAGE_WARNING_RATIO else logger.info
     log(
@@ -118,6 +129,7 @@ def _log_storage(storage: SmsStorage) -> None:
 
 
 def _parse_cmgr_header(line: str) -> tuple[str, str, str | None]:
+    """Analyse l'en-tête +CMGR (statut, numéro expéditeur, horodatage centre SMS)."""
     if not line.startswith("+CMGR:"):
         raise ValueError("missing +CMGR header")
     fields = _csv_fields(line.split(":", 1)[1].strip())
@@ -130,6 +142,7 @@ def _parse_cmgr_header(line: str) -> tuple[str, str, str | None]:
 
 
 def _parse_cmgl_header(line: str) -> tuple[int, str, str, str | None]:
+    """Analyse un en-tête d'énumération +CMGL."""
     if not line.startswith("+CMGL:"):
         raise ValueError("missing +CMGL header")
     fields = _csv_fields(line.split(":", 1)[1].strip())
@@ -143,6 +156,8 @@ def _parse_cmgl_header(line: str) -> tuple[int, str, str, str | None]:
 
 
 class Sim800Modem:
+    """Pilote de communication avec le module GSM (SIM800L / SIM868)."""
+
     def __init__(
         self,
         at: AtProtocol,
@@ -164,22 +179,27 @@ class Sim800Modem:
         self._selected_storage: str | None = None
 
     def open(self) -> None:
+        """Ouvre la liaison série du modem."""
         self.at.transport.open()
 
     def close(self) -> None:
+        """Ferme la liaison série du modem."""
         self.at.transport.close()
 
     def reconnect(self) -> ModemInitializationReport:
+        """Recommence le cycle de connexion et réinitialise le modem."""
         self.at.transport.reconnect()
         return self.initialize()
 
     def _required(self, command: str):
+        """Exécute une commande AT obligatoire et lève une exception en cas d'échec."""
         response = self.at.execute(command, timeout_seconds=self.command_timeout_seconds)
         if not response.ok:
             raise ModemCommandError(f"{command}: {response.error}")
         return response
 
     def initialize(self) -> ModemInitializationReport:
+        """Initialise le modem, configure les modes SMS text et vérifie le réseau."""
         if not self.at.transport.is_open:
             self.open()
 
@@ -239,6 +259,7 @@ class Sim800Modem:
         )
 
     def select_storage(self, storage: str) -> SmsStorage | None:
+        """Sélectionne l'espace mémoire SMS actif (AT+CPMS)."""
         if _STORAGE_RE.fullmatch(storage) is None:
             raise ValueError("invalid SMS storage name")
         response = self._required(f'AT+CPMS="{storage}"')
@@ -249,6 +270,7 @@ class Sim800Modem:
         return parsed
 
     def get_storage_status(self) -> SmsStorage | None:
+        """Interroge l'état actuel de la mémoire SMS (AT+CPMS?)."""
         response = self.at.execute("AT+CPMS?", timeout_seconds=self.command_timeout_seconds)
         if not response.ok:
             return None
@@ -259,6 +281,7 @@ class Sim800Modem:
         return storage
 
     def configure_cnmi(self, value: str | None = None) -> bool:
+        """Configure les notifications d'arrivée des SMS (AT+CNMI)."""
         cnmi = value or self.cnmi
         if re.fullmatch(r"\d+(?:,\d+){4}", cnmi) is None:
             raise ValueError("CNMI must contain five comma-separated integers")
@@ -269,10 +292,12 @@ class Sim800Modem:
         return response.ok
 
     def _ensure_storage(self, storage: str) -> None:
+        """Bascule sur le stockage demandé s'il diffère du stockage courant."""
         if self._selected_storage != storage:
             self.select_storage(storage)
 
     def read_sms(self, storage: str, index: int) -> ModemSms:
+        """Lit un SMS à un emplacement mémoire donné (AT+CMGR)."""
         if index < 0:
             raise ValueError("SMS index must be >= 0")
         self._ensure_storage(storage)
@@ -303,6 +328,7 @@ class Sim800Modem:
         )
 
     def delete_sms(self, storage: str, index: int) -> None:
+        """Supprime un SMS traité de la mémoire du modem (AT+CMGD)."""
         self._ensure_storage(storage)
         response = self.at.execute(
             f"AT+CMGD={index}",
@@ -312,6 +338,7 @@ class Sim800Modem:
             raise ModemCommandError(f"AT+CMGD={index}: {response.error}")
 
     def list_all_sms(self) -> list[ModemSms]:
+        """Énumère tous les messages présents dans la mémoire courante (AT+CMGL="ALL")."""
         response = self.at.execute(
             'AT+CMGL="ALL"',
             timeout_seconds=self.command_timeout_seconds,
@@ -352,6 +379,7 @@ class Sim800Modem:
         return result
 
     def poll_notification(self, *, timeout_seconds: float = 0.0) -> CmtiNotification | None:
+        """Scrute la réception d'une notification +CMTI pendant l'intervalle spécifié."""
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         first = True
         while first or time.monotonic() < deadline:

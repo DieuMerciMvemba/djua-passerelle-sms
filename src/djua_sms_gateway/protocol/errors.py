@@ -1,12 +1,12 @@
-"""Protocol-specific exceptions."""
+"""Exceptions spécifiques au protocole SMS et au décodage télémétrique."""
 
 
 class ProtocolError(ValueError):
-    """Base class for deterministic protocol errors."""
+    """Classe de base pour toutes les erreurs protocolaires déterministes."""
 
 
 class D1ParseError(ProtocolError):
-    """Raised when a raw SMS cannot be parsed as a D1 message."""
+    """Levée lorsqu'un SMS brut ne peut pas être analysé ou décodé (syntaxe ou champs invalides)."""
 
     def __init__(self, code: str, message: str, field: str | None = None) -> None:
         self.code = code
@@ -16,4 +16,4 @@ class D1ParseError(ProtocolError):
 
 
 class NormalizationError(ProtocolError):
-    """Raised when invalid telemetry cannot be normalized safely."""
+    """Levée lorsqu'une mesure ou télémétrie invalide ne peut pas être normalisée en toute sécurité."""

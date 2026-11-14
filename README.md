@@ -175,10 +175,12 @@ Couvre 269 tests unitaires et d'intégration (conformité D1/D2/D2T2, cryptograp
 
 ## Documentation
 
+- [Exemples concrets de SMS de test (D2T2, D2E, D1)](docs/exemples_sms_test.md)
 - [Règles du projet](AGENTS.md)
 - [Architecture](docs/architecture.md)
 - [Protocole SMS D1](docs/sms_protocol.md)
-- [Protocole SMS D2](docs/sms_protocol_v2.md)\n- [Protocole SMS D2T2 compact + charge DC](docs/sms_protocol_d2t2.md)
+- [Protocole SMS D2](docs/sms_protocol_v2.md)
+- [Protocole SMS D2T2 compact + charge DC](docs/sms_protocol_d2t2.md)
 - [Contrat de données backend](docs/backend_data_contract.md)
 - [Transport GSM/SMS](docs/gsm_transport.md)
 - [Stockage SQLite](docs/storage.md)

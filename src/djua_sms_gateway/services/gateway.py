@@ -1,4 +1,4 @@
-"""Simple orchestration of modem receive, persistence and MQTT outbox work."""
+"""Orchestration globale de la passerelle : modem GSM, persistance SQLite et travailleurs Outbox."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 class DjuaSmsGateway:
+    """Passerelle SMS autonome coordonnant la réception GSM et la publication vers le backend."""
+
     def __init__(
         self,
         modem: Sim800Modem,
@@ -37,6 +39,7 @@ class DjuaSmsGateway:
         self._stopping = False
 
     def startup(self):
+        """Initialise le modem GSM et dépile les éventuels SMS stockés en mémoire."""
         report = self.modem.initialize()
         self._started = True
         recovery_results = []
@@ -51,6 +54,7 @@ class DjuaSmsGateway:
         mqtt_limit: int | None = None,
         http_limit: int | None = None,
     ):
+        """Exécute une itération de la passerelle : scrute le GSM et déclenche les travailleurs Outbox."""
         if not self._started:
             self.startup()
 
@@ -74,6 +78,7 @@ class DjuaSmsGateway:
         return receive_result, mqtt_result, http_result
 
     def reconnect_modem(self):
+        """Tente de reconnecter le modem série suite à une déconnexion matérielle."""
         self._sleep(self.reconnect_seconds)
         report = self.modem.reconnect()
         self._started = True
@@ -88,6 +93,7 @@ class DjuaSmsGateway:
         gsm_poll_timeout_seconds: float = 0.5,
         idle_sleep_seconds: float = 0.05,
     ) -> None:
+        """Boucle principale continue de service résiliente aux pannes réseau ou série."""
         self._stopping = False
         while not self._stopping:
             try:
@@ -112,9 +118,11 @@ class DjuaSmsGateway:
                 self._sleep(idle_sleep_seconds)
 
     def stop(self) -> None:
+        """Signale à la boucle principale de s'arrêter."""
         self._stopping = True
 
     def shutdown(self) -> None:
+        """Arrête la passerelle, ferme la liaison modem et déconnecte les clients réseau."""
         self.stop()
         workers = [self.outbox_worker, self.http_outbox_worker]
         try:

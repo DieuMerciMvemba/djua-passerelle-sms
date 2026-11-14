@@ -1,4 +1,4 @@
-"""Explicit protocol dispatch without changing legacy D1 semantics."""
+"""Aiguillage explicite du protocole (D1, D2T, D2T2, D2E) à partir de l'en-tête du message SMS."""
 
 from __future__ import annotations
 
@@ -6,6 +6,10 @@ from .d2 import D2ProtocolError
 
 
 def detect_protocol(raw_message: str) -> str:
+    """Détecte le protocole utilisé en fonction du préfixe du SMS.
+    
+    Retourne 'D1', 'D2T', 'D2T2' ou 'D2E'. Lève une exception D2ProtocolError si le format n'est pas reconnu.
+    """
     if raw_message.startswith("D1,"):
         return "D1"
     if raw_message.startswith("D2T,"):
@@ -16,6 +20,6 @@ def detect_protocol(raw_message: str) -> str:
         return "D2E"
     raise D2ProtocolError(
         "UNSUPPORTED_PROTOCOL",
-        "expected D1, D2T, D2T2 or D2E",
+        "Protocole attendu : D1, D2T, D2T2 ou D2E",
         "protocol",
     )

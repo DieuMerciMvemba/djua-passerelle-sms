@@ -1,4 +1,4 @@
-"""Pure D2T/D2E codec, validation, authentication and backend mapping."""
+"""Codec, validation, sécurité/authentification et normalisation backend purs pour D2T/D2E."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Iterable
 
 
 class D2ProtocolError(ValueError):
-    """Deterministic D2 protocol/security error with a stable machine code."""
+    """Erreur protocolaire ou de sécurité D2 déterministe avec code machine stable."""
 
     def __init__(self, code: str, message: str, field: str | None = None) -> None:
         self.code = code
@@ -24,12 +24,17 @@ class D2ProtocolError(ValueError):
 
 
 class D2AuthStatus(str, Enum):
+    """Statut de vérification cryptographique HMAC du message."""
     VERIFIED = "VERIFIED"
     NOT_VERIFIED = "NOT_VERIFIED"
 
 
 @dataclass(frozen=True)
 class D2TMessage:
+    """Message télémétrique périodique D2 (D2T).
+    
+    Contient l'état des capteurs batterie, solaire et onduleur AC ainsi que les coordonnées GPS.
+    """
     protocol_version: str
     device_id: str
     sequence: int
@@ -57,35 +62,46 @@ class D2TMessage:
 
     @property
     def rtc_valid(self) -> bool:
+        """Indique si l'horodatage RTC est valide (Bit 0)."""
         return bool(self.flags & 0x01)
 
     @property
     def gps_valid(self) -> bool:
+        """Indique si le point GPS est valide et acquis (Bit 1)."""
         return bool(self.flags & 0x02)
 
     @property
     def battery_valid(self) -> bool:
+        """Indique si les mesures batterie sont valides (Bit 2)."""
         return bool(self.flags & 0x04)
 
     @property
     def solar_valid(self) -> bool:
+        """Indique si les mesures solaires instantanées sont valides (Bit 3)."""
         return bool(self.flags & 0x08)
 
     @property
     def ac_valid(self) -> bool:
+        """Indique si les mesures AC instantanées sont valides (Bit 4)."""
         return bool(self.flags & 0x10)
 
     @property
     def solar_energy_complete(self) -> bool:
+        """Indique si l'intégration d'énergie solaire sur l'intervalle est complète (Bit 5)."""
         return bool(self.flags & 0x20)
 
     @property
     def ac_energy_complete(self) -> bool:
+        """Indique si l'intégration d'énergie AC sur l'intervalle est complète (Bit 6)."""
         return bool(self.flags & 0x40)
 
 
 @dataclass(frozen=True)
 class D2EMessage:
+    """Message d'événement géofence urgent D2 (D2E).
+    
+    Émis immédiatement lors d'une sortie ou entrée de zone de sécurité avec distance calculée.
+    """
     protocol_version: str
     device_id: str
     sequence: int
@@ -102,14 +118,17 @@ class D2EMessage:
 
     @property
     def rtc_valid(self) -> bool:
+        """Indique si l'horodatage RTC est valide (Bit 0)."""
         return bool(self.flags & 0x01)
 
     @property
     def gps_valid(self) -> bool:
+        """Indique si la position GPS de l'alerte est valide (Bit 1)."""
         return bool(self.flags & 0x02)
 
     @property
     def distance_valid(self) -> bool:
+        """Indique si la distance de franchissement par rapport au périmètre est valide (Bit 2)."""
         return bool(self.flags & 0x04)
 
 
@@ -138,7 +157,7 @@ GSM7_EXTENSION = frozenset("^{}\\[~]|€\f")
 
 
 def gsm7_septet_count(value: str) -> int:
-    """Return the real GSM 03.38 septet cost or reject non-GSM text."""
+    """Calcule le coût réel en septets GSM 03.38 ou rejette les caractères non compatibles."""
 
     count = 0
     for char in value:
@@ -155,6 +174,7 @@ def gsm7_septet_count(value: str) -> int:
 
 
 def _validate_wire(raw_message: str) -> None:
+    """Valide les contraintes physiques du SMS (longueur <= 160 septets, alphabet D2, sans espace)."""
     if not raw_message:
         raise D2ProtocolError("EMPTY_MESSAGE", "message is empty")
 
@@ -179,6 +199,7 @@ def _validate_wire(raw_message: str) -> None:
 
 
 def encode_base36(value: int) -> str:
+    """Encode un entier positif en représentation canonique base36 majuscule."""
     if value < 0:
         raise ValueError("encode_base36 expects an unsigned integer")
     if value == 0:
@@ -200,6 +221,7 @@ def _decode_u36(
     maximum: int | None = None,
     fixed_width: int | None = None,
 ) -> int:
+    """Décode un entier non signé en base36 canonique avec contrôle strict des zéros de tête."""
     if fixed_width is not None and len(token) != fixed_width:
         raise D2ProtocolError(
             "NON_CANONICAL_BASE36",
@@ -236,6 +258,7 @@ def _decode_optional_u36(
     minimum: int = 0,
     maximum: int | None = None,
 ) -> int | None:
+    """Décode un entier non signé en base36 optionnel ('-' si absent)."""
     if token == "-":
         return None
     return _decode_u36(
@@ -253,6 +276,7 @@ def _decode_optional_s36(
     minimum: int,
     maximum: int,
 ) -> int | None:
+    """Décode un entier signé en base36 optionnel ('-' si absent, préfixe '-' pour négatif)."""
     if token == "-":
         return None
 
@@ -279,10 +303,12 @@ def _decode_optional_s36(
 
 
 def _scaled(value: int | None, divisor: int | float) -> float | None:
+    """Applique un diviseur d'échelle pour restituer la valeur physique en unité SI."""
     return None if value is None else value / divisor
 
 
 def _validate_auth_shape(auth: str) -> None:
+    """Valide le format du jeton HMAC ('-' ou exactement 11 caractères base64url)."""
     if auth == "-":
         return
     if AUTH_RE.fullmatch(auth) is None:
@@ -294,6 +320,7 @@ def _validate_auth_shape(auth: str) -> None:
 
 
 def _presence(flag: bool, values: Iterable[object | None], name: str) -> None:
+    """Vérifie la stricte conformité entre un drapeau de présence et les champs associés."""
     values = tuple(values)
     if flag and any(value is None for value in values):
         raise D2ProtocolError(
@@ -310,6 +337,7 @@ def _presence(flag: bool, values: Iterable[object | None], name: str) -> None:
 
 
 def validate_d2_message(message: D2Message) -> None:
+    """Valide les règles de cohérence croisée des champs et drapeaux pour D2T et D2E."""
     if DEVICE_ID_RE.fullmatch(message.device_id) is None:
         raise D2ProtocolError(
             "INVALID_DEVICE_ID",
@@ -397,6 +425,7 @@ def validate_d2_message(message: D2Message) -> None:
 
 
 def parse_d2(raw_message: str) -> D2Message:
+    """Analyse un SMS brut D2 (D2T ou D2E) avec décodage des entiers et flottants base36."""
     _validate_wire(raw_message)
     fields = raw_message.split(",")
     protocol = fields[0]
@@ -693,6 +722,7 @@ def parse_d2(raw_message: str) -> D2Message:
 
 
 def calculate_hmac_tag(signed_part: str, key: bytes) -> str:
+    """Calcule le tag d'authentification HMAC-SHA256 tronqué à 8 octets en base64url."""
     if len(key) != 32:
         raise D2ProtocolError(
             "AUTH_KEY_INVALID",
@@ -714,6 +744,7 @@ def verify_d2_security(
     sender: str | None = None,
     allowed_senders: Iterable[str] | None = None,
 ) -> D2AuthStatus:
+    """Vérifie l'intégrité HMAC et la liaison du numéro expéditeur selon le mode (development/production)."""
     mode_value = mode.strip().lower()
     if mode_value not in {"development", "production"}:
         raise ValueError("D2 auth mode must be development or production")
@@ -767,10 +798,12 @@ def verify_d2_security(
 
 
 def derive_message_id(message: D2Message) -> str:
+    """Génère l'identifiant unique et idempotent du message (ex: D2:DJUA-KIN-000001:9IX)."""
     return f"D2:{message.device_id}:{encode_base36(message.sequence)}"
 
 
 def _formatted_timestamp(epoch_s: int) -> str:
+    """Formate un timestamp epoch UTC en chaîne ISO 8601 locale GMT+1."""
     local = datetime.fromtimestamp(
         epoch_s,
         timezone.utc,
@@ -782,6 +815,7 @@ def backend_topic(
     message: D2Message,
     prefix: str = "djua/test",
 ) -> str:
+    """Détermine le topic MQTT ou route backend en fonction du type de message."""
     suffix = (
         "telemetry"
         if isinstance(message, D2TMessage)
@@ -796,6 +830,7 @@ def normalize_d2_to_backend(
     gateway_received_at: str,
     auth_status: D2AuthStatus,
 ) -> dict[str, object]:
+    """Construit le document JSON normalisé pour l'ingestion backend HTTP et MQTT."""
     payload: dict[str, object] = {
         "protocol": message.protocol_version,
         "message_id": derive_message_id(message),

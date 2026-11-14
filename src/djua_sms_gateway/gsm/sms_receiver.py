@@ -1,4 +1,4 @@
-"""Receive modem SMS, persist through ingestion, then delete safely."""
+"""Réception des SMS du modem, persistance immédiate dans SQLite, puis suppression sécurisée."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class ReceiveDisposition(str, Enum):
+    """Résultat du cycle de traitement d'un SMS depuis le modem."""
     STORED = "STORED"
     DUPLICATE_RAW = "DUPLICATE_RAW"
     INVALID = "INVALID"
@@ -32,6 +33,7 @@ class ReceiveDisposition(str, Enum):
 
 @dataclass(frozen=True)
 class SmsReceiveResult:
+    """Rapport d'état suite au traitement d'un SMS (persistance et suppression de la mémoire)."""
     disposition: ReceiveDisposition
     storage: str | None = None
     index: int | None = None
@@ -41,11 +43,18 @@ class SmsReceiveResult:
 
 
 class SmsReceiver:
+    """Coordinateur entre le modem GSM et le service d'ingestion.
+    
+    Garantit le principe "Store-Then-Delete" : un SMS n'est supprimé de la mémoire SIM
+    qu'après confirmation absolue de son écriture durable dans la base locale SQLite.
+    """
+
     def __init__(self, modem: Sim800Modem, ingestion: SmsIngestionService) -> None:
         self.modem = modem
         self.ingestion = ingestion
 
     def process_sms(self, sms: ModemSms) -> SmsReceiveResult:
+        """Persiste le SMS reçu dans SQLite puis supprime le message du modem."""
         try:
             ingestion_result = self.ingestion.ingest(
                 RawSmsInput(
@@ -112,6 +121,7 @@ class SmsReceiver:
         )
 
     def handle_notification(self, notification: CmtiNotification) -> SmsReceiveResult:
+        """Prend en charge une notification +CMTI reçue : lit le SMS et le traite."""
         try:
             sms = self.modem.read_sms(notification.storage, notification.index)
         except SerialTransportError:
@@ -132,12 +142,14 @@ class SmsReceiver:
         return self.process_sms(sms)
 
     def poll_once(self, *, timeout_seconds: float = 0.0) -> SmsReceiveResult:
+        """Effectue une scrutation unique d'arrivée de SMS."""
         notification = self.modem.poll_notification(timeout_seconds=timeout_seconds)
         if notification is None:
             return SmsReceiveResult(ReceiveDisposition.NO_NOTIFICATION)
         return self.handle_notification(notification)
 
     def recover_stored_messages(self) -> list[SmsReceiveResult]:
+        """Récupère tous les SMS résiduels restés dans le modem (ex: arrivés pendant arrêt de la passerelle)."""
         results: list[SmsReceiveResult] = []
         for sms in self.modem.list_all_sms():
             results.append(self.process_sms(sms))
@@ -145,6 +157,7 @@ class SmsReceiver:
 
     @staticmethod
     def _map_ingestion(result: IngestionResult) -> ReceiveDisposition:
+        """Mappe le résultat de l'ingestion SQLite vers l'état ReceiveDisposition."""
         if result.disposition is IngestionDisposition.DUPLICATE_RAW:
             logger.info("SMS_DUPLICATE sms_id=%s", result.sms_id)
             return ReceiveDisposition.DUPLICATE_RAW

@@ -1,4 +1,4 @@
-"""Environment-backed configuration for DJUA_SMS."""
+"""Configuration applicative de la passerelle DJUA_SMS basée sur les variables d'environnement."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """Lit un booléen depuis l'environnement (1, true, yes, on / 0, false, no, off)."""
     raw = os.getenv(name)
     if raw is None:
         return default
@@ -22,17 +23,20 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _env_int(name: str, default: int) -> int:
+    """Lit un entier depuis l'environnement avec valeur par défaut."""
     raw = os.getenv(name)
     return default if raw is None or not raw.strip() else int(raw)
 
 
 def _env_float(name: str, default: float) -> float:
+    """Lit un nombre flottant depuis l'environnement avec valeur par défaut."""
     raw = os.getenv(name)
     return default if raw is None or not raw.strip() else float(raw)
 
 
 @dataclass(frozen=True)
 class GsmConfig:
+    """Paramètres de communication série avec le modem GSM (ex: SIM868 ou SIM800)."""
     serial_port: str
     baud_rate: int = 9600
     serial_timeout_seconds: float = 0.5
@@ -44,6 +48,7 @@ class GsmConfig:
     cnmi: str = "2,1,0,0,0"
 
     def validate(self) -> "GsmConfig":
+        """Valide la cohérence des paramètres du port série et des commandes AT."""
         if not self.serial_port.strip():
             raise ValueError("SERIAL_PORT must not be empty")
         if self.baud_rate <= 0:
@@ -72,6 +77,7 @@ class GsmConfig:
 
     @classmethod
     def from_env(cls) -> "GsmConfig":
+        """Charge la configuration GSM depuis les variables d'environnement."""
         config = cls(
             serial_port=os.getenv("SERIAL_PORT", ""),
             baud_rate=_env_int("SERIAL_BAUD_RATE", 9600),
@@ -100,6 +106,7 @@ class GsmConfig:
 
 @dataclass(frozen=True)
 class D2SecurityConfig:
+    """Politique de sécurité et clés secrètes HMAC pour les protocoles D2."""
     mode: str = "development"
     hmac_keys: dict[str, bytes] = field(default_factory=dict)
     sender_bindings: dict[str, tuple[str, ...]] = field(
@@ -107,6 +114,7 @@ class D2SecurityConfig:
     )
 
     def validate(self) -> "D2SecurityConfig":
+        """Vérifie la validité des clés hexadécimales de 32 octets et des numéros E.164."""
         if self.mode not in {"development", "production"}:
             raise ValueError(
                 "D2_AUTH_MODE must be development or production"
@@ -142,13 +150,16 @@ class D2SecurityConfig:
         return self
 
     def key_for(self, device_id: str) -> bytes | None:
+        """Retourne la clé secrète de 32 octets pour un kit donné, ou None."""
         return self.hmac_keys.get(device_id)
 
     def senders_for(self, device_id: str) -> tuple[str, ...]:
+        """Retourne les numéros de téléphone autorisés pour un kit donné."""
         return self.sender_bindings.get(device_id, ())
 
     @classmethod
     def from_env(cls) -> "D2SecurityConfig":
+        """Instancie la sécurité D2 depuis D2_AUTH_MODE, D2_HMAC_KEYS_JSON et D2_SENDER_BINDINGS_JSON."""
         mode = os.getenv("D2_AUTH_MODE", "development").strip().lower()
 
         try:
@@ -208,6 +219,7 @@ class D2SecurityConfig:
 
 @dataclass(frozen=True)
 class MqttConfig:
+    """Paramètres de connexion et de publication MQTT pour le backend."""
     host: str
     port: int = 1883
     client_id: str = "djua-sms-gateway-001"
@@ -224,6 +236,7 @@ class MqttConfig:
     tls: bool = False
 
     def validate(self, *, require_host: bool = True) -> "MqttConfig":
+        """Valide l'hôte, le port, le client_id et la structure du préfixe de topic."""
         host = self.host.strip()
         client_id = self.client_id.strip()
         prefix = self.topic_prefix.strip().strip("/")
@@ -271,10 +284,12 @@ class MqttConfig:
 
     @property
     def normalized_topic_prefix(self) -> str:
+        """Retourne le préfixe de topic nettoyé des slashes extrêmes."""
         return self.topic_prefix.strip().strip("/")
 
     @classmethod
     def from_env(cls, *, require_host: bool = True) -> "MqttConfig":
+        """Charge la configuration MQTT depuis l'environnement."""
         username = os.getenv("MQTT_USERNAME") or None
         password = os.getenv("MQTT_PASSWORD") or None
         config = cls(
@@ -319,6 +334,7 @@ class MqttConfig:
 
 @dataclass(frozen=True)
 class HttpConfig:
+    """Paramètres du client d'ingestion REST HTTP (POST /api/v1/telemetry)."""
     backend_url: str
     events_url: str | None = None
     auth_token: str | None = field(default=None, repr=False)
@@ -331,6 +347,7 @@ class HttpConfig:
 
     @staticmethod
     def _validate_url(name: str, value: str) -> str:
+        """Valide qu'une URL commence bien par http:// ou https:// sans informations d'authentification."""
         try:
             parsed = urlsplit(value.strip())
             parsed.port
@@ -351,6 +368,7 @@ class HttpConfig:
         return value.strip()
 
     def validate(self) -> "HttpConfig":
+        """Valide les URLs, les timeouts et les en-têtes HTTP personnalisés."""
         self._validate_url("HTTP_BACKEND_URL", self.backend_url)
         if self.events_url:
             self._validate_url("HTTP_EVENTS_URL", self.events_url)
@@ -378,6 +396,7 @@ class HttpConfig:
 
     @classmethod
     def from_env(cls) -> "HttpConfig":
+        """Charge la configuration HTTP depuis HTTP_BACKEND_URL et les variables associées."""
         backend_url = os.getenv("HTTP_BACKEND_URL", "").strip()
         if not backend_url:
             raise ValueError(
@@ -410,12 +429,14 @@ class HttpConfig:
 
 @dataclass(frozen=True)
 class AppConfig:
+    """Configuration générale de l'application : persistance SQLite et choix du transport."""
     database_path: str = "data/djua_sms_gateway.db"
     backend_transport: str = "mqtt"
     http: HttpConfig | None = None
 
     @classmethod
     def from_env(cls) -> "AppConfig":
+        """Charge la configuration globale et instancie la configuration HTTP si activée."""
         transport = os.getenv("BACKEND_TRANSPORT", "mqtt").strip().lower()
         if transport not in {"mqtt", "http", "both"}:
             raise ValueError(

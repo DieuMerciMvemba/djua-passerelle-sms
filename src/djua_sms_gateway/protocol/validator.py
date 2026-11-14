@@ -1,4 +1,4 @@
-"""Structural and contract validation for parsed D1 telemetry."""
+"""Validation structurelle et contractuelle pour la télémétrie D1 analysée."""
 
 from __future__ import annotations
 
@@ -8,14 +8,20 @@ import re
 
 from .models import SmsTelemetry, ValidationResult, ValidationStatus
 
+# Regex pour l'identifiant matériel du kit (ex: DJUA-KIN-000001)
 DEVICE_ID_RE = re.compile(r"^[A-Z0-9-]{1,32}$")
+# Jeton d'authentification optionnel (11 caractères base64url pour D1)
 AUTH_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+# Masque des 5 drapeaux de validité supportés en D1 (bits 0 à 4 = 0x1F)
 SUPPORTED_FLAGS_MASK = 0x1F
+# Valeur maximale du compteur millis() de l'ESP32 sur uint32
 MAX_ESP32_MILLIS = 0xFFFFFFFF
+# Fuseau horaire supporté pour le contrat DJUA (GMT+1 = 60 minutes)
 CONFIRMED_DJUA_TIMEZONE_MINUTES = 60
 
 
 def _all_finite(values: tuple[tuple[str, float | None], ...], errors: list[str]) -> None:
+    """Vérifie que toutes les valeurs flottantes fournies ne sont ni NaN ni infinies."""
     for name, value in values:
         if value is not None and not math.isfinite(value):
             errors.append(f"{name}: value must be finite")
@@ -28,6 +34,7 @@ def _check_measurement_group(
     errors: list[str],
     warnings: list[str],
 ) -> None:
+    """Valide la cohérence entre le drapeau de validité d'un capteur et les mesures fournies."""
     missing = [field for field, value in values if value is None]
     provided = [field for field, value in values if value is not None]
 
@@ -38,24 +45,35 @@ def _check_measurement_group(
 
 
 def validate_telemetry(telemetry: SmsTelemetry) -> ValidationResult:
+    """Valide les règles métier et contraintes physiques d'une télémétrie D1.
+    
+    Vérifie les bornes numériques, la validité des coordonnées GPS (-90..90, -180..180),
+    l'exactitude du timestamp RTC horodaté et la présence des mesures requises.
+    """
     errors: list[str] = []
     warnings: list[str] = []
 
+    # Vérification de la conformité du protocole
     if telemetry.protocol_version != "D1":
         errors.append(f"protocol: unsupported version {telemetry.protocol_version!r}")
 
+    # Validation du format de l'identifiant kit
     if DEVICE_ID_RE.fullmatch(telemetry.device_id) is None:
         errors.append("device_id: expected [A-Z0-9-]{1,32}")
 
+    # Les bits réservés (au-delà de 0x1F) doivent être à zéro
     if telemetry.flags & ~SUPPORTED_FLAGS_MASK:
         errors.append("flags: reserved bits must be zero for D1")
 
+    # Numéro de séquence incrémental
     if telemetry.sequence < 0:
         errors.append("sequence: must be non-negative")
 
+    # Temps de fonctionnement depuis le boot de l'ESP32
     if telemetry.uptime_ms < 0 or telemetry.uptime_ms > MAX_ESP32_MILLIS:
         errors.append("uptime_ms: must fit ESP32 millis() uint32 range")
 
+    # Intervalle d'échantillonnage
     if telemetry.interval_seconds <= 0:
         errors.append("interval_seconds: must be greater than zero")
 
@@ -77,6 +95,7 @@ def validate_telemetry(telemetry: SmsTelemetry) -> ValidationResult:
     )
     _all_finite(numeric_values, errors)
 
+    # Validation du bloc horloge RTC
     if telemetry.rtc_valid:
         if telemetry.rtc is None:
             errors.append("rtc: RTC-valid flag requires a timestamp")
@@ -95,6 +114,7 @@ def validate_telemetry(telemetry: SmsTelemetry) -> ValidationResult:
     elif telemetry.rtc is not None or telemetry.timezone_minutes is not None:
         warnings.append("rtc: RTC-invalid flag set; rtc/timezone values will be ignored")
 
+    # Validation du bloc géolocalisation GPS
     if telemetry.gps_valid:
         if telemetry.latitude is None or telemetry.longitude is None:
             errors.append("gps: GPS-valid flag requires latitude and longitude")
@@ -108,6 +128,7 @@ def validate_telemetry(telemetry: SmsTelemetry) -> ValidationResult:
         if gps_values != (None, None) and gps_values != (0.0, 0.0):
             warnings.append("gps: GPS-invalid flag set; coordinates will be ignored")
 
+    # Validation des capteurs physiques : Batterie, Solaire, Onduleur AC
     _check_measurement_group(
         "battery",
         telemetry.battery_valid,
@@ -145,12 +166,14 @@ def validate_telemetry(telemetry: SmsTelemetry) -> ValidationResult:
         warnings,
     )
 
+    # Validation de l'authentification
     if telemetry.auth != "-":
         if AUTH_RE.fullmatch(telemetry.auth) is None:
             errors.append("auth: expected '-' or 11 base64url characters")
         else:
             warnings.append("auth: AUTH_NOT_VERIFIED")
 
+    # Détermination du statut global de validation
     if errors:
         status = ValidationStatus.INVALID_FORMAT
     elif warnings:

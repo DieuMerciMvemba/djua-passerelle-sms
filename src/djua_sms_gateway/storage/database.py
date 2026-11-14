@@ -1,4 +1,4 @@
-"""Small sqlite3 database wrapper with explicit compatible migrations."""
+"""Gestionnaire de base de données sqlite3 avec migrations de schéma automatiques."""
 
 from __future__ import annotations
 
@@ -7,11 +7,12 @@ from pathlib import Path
 import sqlite3
 from typing import Iterator
 
+# Version courante du schéma de base de données
 SCHEMA_VERSION = 3
 
 
 class ClosingConnection(sqlite3.Connection):
-    """sqlite3 connection that also closes at the end of a with block."""
+    """Connexion sqlite3 qui se ferme automatiquement à la sortie du bloc de contexte."""
 
     def __exit__(self, exc_type, exc_value, traceback):
         try:
@@ -102,12 +103,13 @@ _MIGRATION_V2_TO_V3 = (
 
 
 class Database:
-    """Owns schema initialization and short-lived SQLite connections."""
+    """Gestionnaire de persistance SQLite : création du schéma, migrations et transactions."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
 
     def connect(self) -> sqlite3.Connection:
+        """Ouvre une connexion SQLite avec support des clés étrangères et d'un timeout de verrou."""
         connection = sqlite3.connect(
             self.path,
             timeout=5.0,
@@ -119,6 +121,7 @@ class Database:
         return connection
 
     def initialize(self) -> None:
+        """Initialise le dossier, les tables SQLite et applique les migrations selon user_version."""
         parent = Path(self.path).expanduser().parent
         if self.path != ":memory:":
             parent.mkdir(parents=True, exist_ok=True)
@@ -160,6 +163,7 @@ class Database:
         *,
         immediate: bool = False,
     ) -> Iterator[sqlite3.Connection]:
+        """Fournit un contexte transactionnel avec commit automatique ou rollback sur exception."""
         connection = self.connect()
         try:
             connection.execute(

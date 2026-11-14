@@ -1,4 +1,4 @@
-"""Synchronous worker that drains due MQTT outbox rows deterministically."""
+"""Processus d'arrière-plan expédiant de façon déterministe les lignes de l'outbox MQTT échues."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class WorkerRunResult:
+    """Bilan d'un passage du travailleur de vidage d'outbox MQTT."""
     due: int = 0
     started: int = 0
     acked_immediately: int = 0
@@ -24,6 +25,8 @@ class WorkerRunResult:
 
 
 class MqttOutboxWorker:
+    """Travailleur périodique chargé de publier les messages MQTT en attente d'envoi."""
+
     def __init__(
         self,
         repository: SmsRepository,
@@ -38,6 +41,7 @@ class MqttOutboxWorker:
         self._clock = clock
 
     def run_once(self, *, limit: int | None = None) -> WorkerRunResult:
+        """Exécute un cycle de dépilement : gère les timeouts, récupère les messages dus et les émet."""
         self.publisher.expire_timeouts()
         now = self._clock()
         pending = self.repository.list_pending_outbox(
@@ -84,4 +88,5 @@ class MqttOutboxWorker:
         )
 
     def shutdown(self) -> None:
+        """Arrête proprement le client MQTT."""
         self.client.disconnect()

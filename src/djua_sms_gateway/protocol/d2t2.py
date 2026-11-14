@@ -1,11 +1,8 @@
-"""Compact D2T2 telemetry codec with DC-load measurements.
+"""Codec télémétrique compact D2T2 avec mesures de charge DC intégrées.
 
-D2T2 is a new wire format. It does not replace or alter D2T/D2E parsing.
-The wire shape is exactly:
-
+D2T2 est un format compact binaire en base64url conçu pour les trames SMS courtes :
     D2T2,DEV,PAYLOAD,AUTH
-
-PAYLOAD is exactly 60 bytes encoded as 80 unpadded Base64URL characters.
+Le champ PAYLOAD contient exactement 60 octets binaires encodés en 80 caractères Base64URL sans padding.
 """
 
 from __future__ import annotations
@@ -40,9 +37,9 @@ D2T2_DEFINED_FLAGS = 0x01FF
 
 D2T2_PAYLOAD_RE = re.compile(r"^[A-Za-z0-9_-]{80}$")
 
-# Bit order is network-style: most-significant bit first.
-# Signed fields use fixed-width two's-complement.
-# name, width, signed
+# Ordre des bits réseau : bit le plus significatif en premier (MSB first).
+# Les champs signés utilisent le complément à deux sur largeur fixe.
+# Format : (nom_du_champ, largeur_en_bits, est_signé)
 D2T2_LAYOUT = (
     ("sequence", 32, False),
     ("rtc_epoch_s", 32, False),
@@ -77,6 +74,7 @@ if sum(width for _, width, _ in D2T2_LAYOUT) != D2T2_PAYLOAD_BYTES * 8:
 
 @dataclass(frozen=True)
 class D2T2Message:
+    """Message télémétrique D2T2 compacté, incluant les charges AC et DC."""
     protocol_version: str
     device_id: str
     sequence: int
@@ -110,38 +108,47 @@ class D2T2Message:
 
     @property
     def rtc_valid(self) -> bool:
+        """Horloge temps-réel RTC valide (Bit 0)."""
         return bool(self.flags & 0x0001)
 
     @property
     def gps_valid(self) -> bool:
+        """Position GPS valide (Bit 1)."""
         return bool(self.flags & 0x0002)
 
     @property
     def battery_valid(self) -> bool:
+        """Mesures de tension/courant/puissance batterie valides (Bit 2)."""
         return bool(self.flags & 0x0004)
 
     @property
     def solar_valid(self) -> bool:
+        """Mesures solaires instantanées valides (Bit 3)."""
         return bool(self.flags & 0x0008)
 
     @property
     def ac_valid(self) -> bool:
+        """Mesures instantanées onduleur AC valides (Bit 4)."""
         return bool(self.flags & 0x0010)
 
     @property
     def solar_energy_complete(self) -> bool:
+        """Intégration d'énergie solaire complète sur l'intervalle (Bit 5)."""
         return bool(self.flags & 0x0020)
 
     @property
     def ac_energy_complete(self) -> bool:
+        """Intégration d'énergie AC complète sur l'intervalle (Bit 6)."""
         return bool(self.flags & 0x0040)
 
     @property
     def dc_load_valid(self) -> bool:
+        """Mesures instantanées charge DC valides (Bit 7)."""
         return bool(self.flags & 0x0080)
 
     @property
     def dc_load_energy_complete(self) -> bool:
+        """Intégration d'énergie charge DC complète sur l'intervalle (Bit 8)."""
         return bool(self.flags & 0x0100)
 
 
@@ -170,6 +177,7 @@ def _validate_wire(raw_message: str) -> None:
 
 
 def _validate_auth_shape(auth: str) -> None:
+    """Valide le format du tag HMAC de D2T2 ('-' ou 11 caractères base64url)."""
     if auth == "-":
         return
     if AUTH_RE.fullmatch(auth) is None:
@@ -181,6 +189,7 @@ def _validate_auth_shape(auth: str) -> None:
 
 
 def _decode_payload(payload: str) -> dict[str, int]:
+    """Décode les 80 caractères Base64URL canoniques en 60 octets et extrait les champs binaires."""
     if D2T2_PAYLOAD_RE.fullmatch(payload) is None:
         raise D2ProtocolError(
             "D2T2_PAYLOAD_SHAPE",
@@ -238,6 +247,7 @@ def _require_range(
     minimum: int,
     maximum: int,
 ) -> None:
+    """Contrôle que l'entier décodé respecte les limites autorisées [min, max]."""
     if value < minimum or value > maximum:
         raise D2ProtocolError(
             "OUT_OF_RANGE",
@@ -251,6 +261,7 @@ def _require_zero_when_invalid(
     values: tuple[int, ...],
     field_name: str,
 ) -> None:
+    """Exige que les bits de mesure brute soient à 0 lorsque le bit de validité est désactivé."""
     if not valid and any(value != 0 for value in values):
         raise D2ProtocolError(
             "NON_CANONICAL_ABSENT",
@@ -260,10 +271,12 @@ def _require_zero_when_invalid(
 
 
 def _scaled(value: int, divisor: int | float) -> float:
+    """Multiplie ou divise la valeur brute par l'échelle physique."""
     return value / divisor
 
 
 def parse_d2t2(raw_message: str) -> D2T2Message:
+    """Analyse, valide et décode un message SMS complet au format D2T2."""
     _validate_wire(raw_message)
     fields = raw_message.split(",")
 
@@ -638,6 +651,7 @@ def verify_d2t2_security(
     sender: str | None = None,
     allowed_senders: Iterable[str] | None = None,
 ) -> D2AuthStatus:
+    """Vérifie l'authenticité HMAC et l'autorisation du numéro expéditeur pour D2T2."""
     return verify_d2_security(
         message,  # type: ignore[arg-type]
         mode=mode,
@@ -648,6 +662,7 @@ def verify_d2t2_security(
 
 
 def _formatted_timestamp(epoch_s: int) -> str:
+    """Formate un timestamp epoch UTC en date ISO 8601 en heure locale GMT+1."""
     local = datetime.fromtimestamp(
         epoch_s,
         timezone.utc,
@@ -659,6 +674,7 @@ def d2t2_backend_topic(
     message: D2T2Message,
     prefix: str = "djua/test",
 ) -> str:
+    """Topic MQTT cible pour la télémétrie D2T2."""
     return f"{prefix.rstrip('/')}/{message.device_id}/telemetry"
 
 
@@ -668,6 +684,7 @@ def normalize_d2t2_to_backend(
     gateway_received_at: str,
     auth_status: D2AuthStatus,
 ) -> dict[str, object]:
+    """Produit le JSON final normalisé pour le serveur backend (incluant la charge DC)."""
     payload: dict[str, object] = {
         "protocol": "D2T2",
         "message_id": derive_message_id(message),  # type: ignore[arg-type]

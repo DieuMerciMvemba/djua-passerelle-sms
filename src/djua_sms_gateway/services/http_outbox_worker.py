@@ -1,4 +1,4 @@
-"""Synchronous worker that retries due persistent HTTP outbox rows."""
+"""Travailleur synchrone réexpédiant les messages de la file outbox persistante vers l'API REST HTTP."""
 
 from __future__ import annotations
 
@@ -17,12 +17,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class HttpWorkerRunResult:
+    """Rapport d'exécution d'un passage du travailleur HTTP outbox."""
     due: int = 0
     published: int = 0
     failed: int = 0
 
 
 class HttpOutboxWorker:
+    """Travailleur dépilant les enregistrements outbox en attente de publication HTTP vers le backend."""
+
     def __init__(
         self,
         repository: SmsRepository,
@@ -37,6 +40,7 @@ class HttpOutboxWorker:
         self._clock = clock
 
     def run_once(self, limit: int | None = None) -> HttpWorkerRunResult:
+        """Exécute un lot de requêtes HTTP POST avec gestion des erreurs 4xx/5xx et backoff."""
         batch_limit = self.config.batch_limit
         if limit is not None:
             batch_limit = min(limit, batch_limit)
@@ -70,6 +74,7 @@ class HttpOutboxWorker:
                 failed += 1
                 continue
 
+            # Statut HTTP 2xx : publication réussie
             if 200 <= response.status_code < 300:
                 self.repository.mark_http_published(outbox.id)
                 logger.info(
@@ -80,6 +85,7 @@ class HttpOutboxWorker:
                 published += 1
                 continue
 
+            # Erreur client 4xx (hors 408/429) : temporisation maximale
             permanent_client_error = (
                 400 <= response.status_code < 500
                 and response.status_code not in {408, 429}
@@ -112,11 +118,13 @@ class HttpOutboxWorker:
         )
 
     def _url_for(self, outbox: OutboxRecord) -> str:
+        """Route l'événement vers l'URL dédiée aux événements ou l'URL générale."""
         if outbox.topic.endswith("/geofence/events"):
             return self.config.events_url or self.config.backend_url
         return self.config.backend_url
 
     def _headers_for(self, outbox: OutboxRecord) -> dict[str, str]:
+        """Génère les en-têtes HTTP (Content-Type, X-DJUA-Topic, Idempotency-Key et Bearer token)."""
         headers = dict(self.config.extra_headers)
         headers.update({
             "Content-Type": "application/json",
@@ -134,6 +142,7 @@ class HttpOutboxWorker:
         *,
         permanent_client_error: bool,
     ) -> None:
+        """Enregistre l'échec et planifie la prochaine tentative d'envoi."""
         delay = (
             self.config.retry_max_seconds
             if permanent_client_error

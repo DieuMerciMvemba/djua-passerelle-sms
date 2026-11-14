@@ -1,4 +1,4 @@
-"""Strict parser for the positional DJUA D1 SMS format."""
+"""Analyseur syntaxique strict pour le format SMS positionnel DJUA D1."""
 
 from __future__ import annotations
 
@@ -7,31 +7,37 @@ import re
 from .errors import D1ParseError
 from .models import SmsTelemetry
 
+# Nombre exact de champs attendus dans une trame CSV D1
 FIELD_COUNT = 23
+# Expressions régulières de validation de format
 BASE36_RE = re.compile(r"^[0-9A-Z]+$")
 DJUA_PROTOCOL_RE = re.compile(r"^D[0-9]+$")
 FLAGS_RE = re.compile(r"^[0-9A-F]{2}$")
 
 
 def decode_base36(value: str, field: str) -> int:
+    """Décode un entier compacté en base 36 majuscule (ex: uptime, séquence)."""
     if not value or BASE36_RE.fullmatch(value) is None:
         raise D1ParseError("INVALID_BASE36", "expected uppercase base36", field)
     return int(value, 36)
 
 
 def _parse_required_int(value: str, field: str) -> int:
+    """Valide et convertit un entier décimal obligatoire."""
     if re.fullmatch(r"[+-]?\d+", value) is None:
         raise D1ParseError("INVALID_INTEGER", "expected decimal integer", field)
     return int(value, 10)
 
 
 def _parse_optional_int(value: str, field: str) -> int | None:
+    """Valide et convertit un entier décimal optionnel ('-' si absent)."""
     if value == "-":
         return None
     return _parse_required_int(value, field)
 
 
 def _parse_optional_float(value: str, field: str) -> float | None:
+    """Valide et convertit un nombre flottant optionnel ('-' si absent)."""
     if value == "-":
         return None
     try:
@@ -45,6 +51,11 @@ def _parse_optional_float(value: str, field: str) -> float | None:
 
 
 def parse_d1(raw_message: str) -> SmsTelemetry:
+    """Analyse une chaîne SMS brute au format positionnel D1 et instancie SmsTelemetry.
+    
+    Effectue les vérifications initiales (non-vide, ASCII pur, absence d'espaces blancs),
+    découpe les 23 champs séparés par des virgules et applique les masques binaires de validité.
+    """
     if not raw_message:
         raise D1ParseError("EMPTY_MESSAGE", "message is empty")
     if not raw_message.isascii():
@@ -52,6 +63,7 @@ def parse_d1(raw_message: str) -> SmsTelemetry:
     if any(char.isspace() for char in raw_message):
         raise D1ParseError("UNEXPECTED_WHITESPACE", "whitespace is not allowed in D1")
 
+    # Découpage strict des champs CSV
     fields = raw_message.split(",")
     if len(fields) != FIELD_COUNT:
         raise D1ParseError(
@@ -85,6 +97,7 @@ def parse_d1(raw_message: str) -> SmsTelemetry:
         auth,
     ) = fields
 
+    # Validation du marqueur de protocole (doit commencer par 'D')
     if DJUA_PROTOCOL_RE.fullmatch(protocol) is None:
         raise D1ParseError(
             "NOT_DJUA",
@@ -102,9 +115,11 @@ def parse_d1(raw_message: str) -> SmsTelemetry:
             "flags",
         )
 
+    # Conversion de l'octet de drapeaux hexadécimal (ex: '1F' -> 0x1F)
     flags = int(flags_raw, 16)
     rtc = None if rtc_raw == "-" else rtc_raw
 
+    # Extraction des drapeaux binaires de validité des capteurs
     return SmsTelemetry(
         protocol_version=protocol,
         device_id=device_id,

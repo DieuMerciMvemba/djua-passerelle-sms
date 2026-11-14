@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Production launcher for the DJUA_SMS gateway."""
+"""Lanceur de production pour la passerelle SMS DJUA."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def resolve_gateway_platform(
     *,
     system: str | None = None,
 ) -> str:
-    """Resolve auto/windows/linux without coupling platform choice to GsmConfig."""
+    """Détecte et valide la plateforme hôte cible (auto, windows ou linux)."""
 
     value = (
         os.getenv("GATEWAY_PLATFORM", "auto")
@@ -76,7 +76,7 @@ def resolve_gateway_platform(
 
 
 def validate_serial_port(serial_port: str, gateway_platform: str) -> None:
-    """Check that SERIAL_PORT matches the explicitly selected runtime OS."""
+    """Vérifie que la syntaxe du port série correspond au système d'exploitation d'exécution (COMx ou /dev/...)."""
 
     if gateway_platform == "windows":
         is_com = re.fullmatch(r"COM\d+", serial_port, re.IGNORECASE) is not None
@@ -102,7 +102,7 @@ def validate_serial_port(serial_port: str, gateway_platform: str) -> None:
 
 
 def load_env_file(path: str | Path, *, override: bool = False) -> dict[str, str]:
-    """Load a small KEY=VALUE file without requiring python-dotenv."""
+    """Charge un fichier d'environnement simple CLE=VALEUR sans dépendance externe."""
 
     env_path = Path(path)
     if not env_path.exists():

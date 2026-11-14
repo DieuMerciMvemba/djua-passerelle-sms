@@ -1,4 +1,4 @@
-"""Simple immutable models for the D1 protocol core."""
+"""Modèles immuables représentant les données décodées du protocole D1."""
 
 from __future__ import annotations
 
@@ -8,17 +8,20 @@ from typing import Any
 
 
 class ValidationStatus(str, Enum):
+    """Statut de validation du format et des règles du SMS."""
     INVALID_FORMAT = "INVALID_FORMAT"
     VALID_WITH_WARNING = "VALID_WITH_WARNING"
     VALID = "VALID"
 
 
 class AuthStatus(str, Enum):
+    """Statut d'authentification pour les messages D1 (historiquement non vérifiés)."""
     NOT_VERIFIED = "AUTH_NOT_VERIFIED"
 
 
 @dataclass(frozen=True)
 class SmsTelemetry:
+    """Structure immuable contenant l'ensemble des grandeurs physiques et métadonnées d'une télémétrie D1."""
     protocol_version: str
     device_id: str
     sequence: int

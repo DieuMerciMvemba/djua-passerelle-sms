@@ -1,7 +1,7 @@
-"""Thin MQTT client boundary around paho-mqtt.
+"""Interface et encapsulation du client MQTT basé sur la bibliothèque paho-mqtt.
 
-Paho is imported lazily so unit tests can inject a fake client without network
-or an installed broker dependency. Production use requires paho-mqtt==2.1.0.
+Paho est importé à la demande afin de permettre l'exécution des tests unitaires
+avec un faux client sans dépendance réseau ni courtier broker MQTT réel.
 """
 
 from __future__ import annotations
@@ -17,23 +17,28 @@ logger = logging.getLogger(__name__)
 
 
 class MqttError(RuntimeError):
+    """Classe de base pour les erreurs MQTT."""
     pass
 
 
 class MqttConnectionError(MqttError):
+    """Levée lors d'un refus de connexion ou d'un dépassement de délai vers le broker."""
     pass
 
 
 class MqttPublishError(MqttError):
+    """Levée en cas d'échec d'émission d'un message MQTT."""
     pass
 
 
 @dataclass(frozen=True)
 class PublishReceipt:
+    """Accusé de transmission local contenant l'identifiant de message MQTT (mid)."""
     mid: int
 
 
 class MqttClientProtocol(Protocol):
+    """Protocole abstrait représentant le client MQTT."""
     @property
     def connected(self) -> bool: ...
     def set_publish_ack_handler(self, handler: Callable[[int], None]) -> None: ...
@@ -45,6 +50,7 @@ class MqttClientProtocol(Protocol):
 
 
 def _reason_is_failure(reason_code: object) -> bool:
+    """Détermine si un code de retour de connexion Paho représente un échec."""
     if hasattr(reason_code, "is_failure"):
         return bool(getattr(reason_code, "is_failure"))
     try:
@@ -54,6 +60,8 @@ def _reason_is_failure(reason_code: object) -> bool:
 
 
 class PahoMqttClient:
+    """Client MQTT robuste utilisant le moteur de boucles asynchrones de Paho."""
+
     def __init__(self, config: MqttConfig, *, client: object | None = None) -> None:
         self.config = config.validate()
         self._connected = False
@@ -80,6 +88,7 @@ class PahoMqttClient:
         self._configure_client()
 
     def _configure_client(self) -> None:
+        """Applique les identifiants, TLS, délais de reconnexion et callbacks d'événements."""
         if self.config.username:
             self._client.username_pw_set(self.config.username, self.config.password)
         if self.config.tls:
@@ -96,15 +105,19 @@ class PahoMqttClient:
 
     @property
     def connected(self) -> bool:
+        """Indique si la connexion réseau avec le broker MQTT est établie."""
         return self._connected
 
     def set_publish_ack_handler(self, handler: Callable[[int], None]) -> None:
+        """Définit le rappel déclenché lors de la réception d'un accusé PUBACK (QoS 1)."""
         self._ack_handler = handler
 
     def set_disconnect_handler(self, handler: Callable[[], None]) -> None:
+        """Définit le rappel déclenché en cas de perte de connexion fortuite."""
         self._disconnect_handler = handler
 
     def connect(self) -> None:
+        """Établit la connexion avec le broker et démarre le thread réseau en arrière-plan."""
         if self._connected:
             return
         logger.info(
@@ -141,9 +154,11 @@ class PahoMqttClient:
             raise MqttConnectionError(self._connect_error or "MQTT connection refused")
 
     def reconnect(self) -> None:
+        """Relance une tentative de connexion au broker."""
         self.connect()
 
     def disconnect(self) -> None:
+        """Coupe proprement la connexion MQTT et arrête le thread de boucle."""
         try:
             if self._loop_started:
                 self._client.disconnect()
@@ -155,6 +170,7 @@ class PahoMqttClient:
             logger.info("MQTT_DISCONNECTED intentional=true")
 
     def publish(self, topic: str, payload: str, *, qos: int, retain: bool) -> PublishReceipt:
+        """Publie une charge utile JSON sur un topic spécifié."""
         if not self._connected:
             raise MqttPublishError("MQTT client is not connected")
         info = self._client.publish(topic, payload=payload, qos=qos, retain=retain)
@@ -165,6 +181,7 @@ class PahoMqttClient:
         return PublishReceipt(mid=mid)
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
+        """Gestionnaire de notification de connexion établie ou refusée."""
         if _reason_is_failure(reason_code):
             self._connected = False
             self._connect_error = f"broker rejected connection: {reason_code}"
@@ -175,16 +192,19 @@ class PahoMqttClient:
         self._connect_event.set()
 
     def _on_connect_fail(self, client, userdata) -> None:
+        """Gestionnaire d'échec de négociation TCP / DNS."""
         self._connected = False
         self._connect_error = "TCP/DNS connection failed"
         self._connect_event.set()
 
     def _on_disconnect(self, client, userdata, *args) -> None:
+        """Gestionnaire de déconnexion inattendue."""
         self._connected = False
         logger.warning("MQTT_DISCONNECTED intentional=false")
         if self._disconnect_handler:
             self._disconnect_handler()
 
     def _on_publish(self, client, userdata, mid, *args) -> None:
+        """Gestionnaire de réception d'acquittement de publication (PUBACK)."""
         if self._ack_handler:
             self._ack_handler(int(mid))

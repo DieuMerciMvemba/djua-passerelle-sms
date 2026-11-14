@@ -1,4 +1,4 @@
-"""SQLite repository implementing non-loss, deduplication and outbox semantics."""
+"""Dépôt SQLite garantissant le zéro perte (Store-First), la déduplication et l'outbox transactionnel."""
 
 from __future__ import annotations
 
@@ -25,10 +25,12 @@ from .models import (
 
 
 def utc_now() -> str:
+    """Retourne la date/heure courante au format ISO 8601 UTC."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _sha256_json(value: object) -> str:
+    """Calcule l'empreinte SHA-256 d'un dictionnaire sérialisé de manière déterministe."""
     encoded = json.dumps(
         value,
         ensure_ascii=False,
@@ -40,11 +42,9 @@ def _sha256_json(value: object) -> str:
 
 
 def compute_raw_dedupe_key(raw: RawSmsInput) -> str:
-    """Hash sender + modem time when present + exact raw body.
+    """Génère l'empreinte de déduplication brute à partir de l'expéditeur et du corps du SMS.
 
-    If the modem timestamp is unavailable, the exact sender/body pair is used.
-    D1 embeds sequence/RTC/uptime, so an identical body is intentionally treated
-    as the same received message rather than creating a second logical delivery.
+    Si le modem fournit un horodatage, il est inclus pour distinguer les réémissions réelles.
     """
 
     return _sha256_json(
@@ -58,10 +58,10 @@ def compute_raw_dedupe_key(raw: RawSmsInput) -> str:
 
 
 def canonical_logical_message(telemetry: SmsTelemetry) -> str:
-    """Return a stable semantic D1 representation excluding transport auth text.
+    """Construit une chaîne JSON sémantique normalisée pour le protocole D1 (sans auth).
 
-    Values belonging to a group whose validity flag is false are canonicalized
-    to null because the normalizer deliberately ignores those raw values.
+    Les champs dont le bit de validité est faux sont remplacés par null car le normalisateur
+    les ignore expressément.
     """
 
     value = {
@@ -112,6 +112,7 @@ def canonical_logical_message(telemetry: SmsTelemetry) -> str:
 
 
 def compute_logical_dedupe_key(telemetry: SmsTelemetry) -> str:
+    """Calcule l'empreinte de déduplication logique évitant le traitement double d'une trame D1."""
     return _sha256_json(
         {
             "v": "logical-v1",
@@ -125,7 +126,7 @@ def compute_logical_dedupe_key(telemetry: SmsTelemetry) -> str:
 
 
 def compute_d2_content_hash(message: D2Message) -> str:
-    """Hash the canonical signed D2 content, excluding AUTH text."""
+    """Calcule l'empreinte SHA-256 de la partie signée canonique d'une trame D2 (sans le jeton auth)."""
 
     return hashlib.sha256(
         message.signed_part.encode("ascii")
@@ -184,6 +185,8 @@ def _outbox_from_row(row: sqlite3.Row) -> OutboxRecord:
 
 
 class SmsRepository:
+    """Couche d'accès aux données SQLite gérant la déduplication et l'outbox multiprotocole (MQTT / HTTP)."""
+
     def __init__(
         self,
         database: Database,
@@ -199,6 +202,7 @@ class SmsRepository:
         self.database.initialize()
 
     def _refresh_global_status(self, connection, outbox_id: int, now: str) -> None:
+        """Met à jour le statut global (PUBLISHED si tous les transports configurés ont abouti)."""
         row = connection.execute(
             "SELECT sms_id, mqtt_done, http_done FROM mqtt_outbox WHERE id = ?",
             (outbox_id,),
@@ -224,6 +228,7 @@ class SmsRepository:
             )
 
     def store_raw_sms(self, raw: RawSmsInput) -> StoreRawSmsResult:
+        """Enregistre le SMS brut de façon atomique et dédupliquée avant tout décodage applicatif."""
         raw_key = compute_raw_dedupe_key(raw)
         received_at = raw.gateway_received_at or utc_now()
         now = utc_now()
@@ -269,6 +274,7 @@ class SmsRepository:
         validation_warning: str | None = None,
         telemetry: SmsTelemetry | None = None,
     ) -> InboundSmsRecord:
+        """Enregistre l'échec de validation d'un SMS dans `inbound_sms` avec la raison détaillée."""
         now = utc_now()
         protocol_version = telemetry.protocol_version if telemetry else None
         device_id = telemetry.device_id if telemetry else None
@@ -314,6 +320,7 @@ class SmsRepository:
         qos: int = 1,
         retain: bool = False,
     ) -> QueueResult:
+        """Place un message D1 validé dans la table outbox après vérification de déduplication logique."""
         logical_key = compute_logical_dedupe_key(telemetry)
         warning_text = "\n".join(validation.warnings) or None
         now = utc_now()
@@ -417,7 +424,7 @@ class SmsRepository:
         security_status: str,
         auth_status: str | None = None,
     ) -> InboundSmsRecord:
-        """Archive a parsed D2 security rejection without claiming message_id."""
+        """Archive un rejet de sécurité D2 sans consommer l'identifiant message_id."""
 
         now = utc_now()
         message_id = derive_message_id(message)
@@ -467,11 +474,10 @@ class SmsRepository:
         qos: int = 1,
         retain: bool = False,
     ) -> QueueResult:
-        """Atomically claim a D2 message_id and create its MQTT outbox.
+        """Réserve de manière atomique le message_id D2 et insère la charge dans la table outbox.
 
-        Replays with the same signed content create no second outbox.
-        The same message_id with different signed content is an explicit
-        conflict and is never downgraded to a normal duplicate.
+        Les réémissions avec contenu signé identique ne créent pas de second outbox (déduplication).
+        Un message_id identique avec un contenu signé différent constitue un conflit explicite.
         """
 
         message_id = derive_message_id(message)

@@ -1,4 +1,4 @@
-"""Persistence models for inbound SMS messages and transport outboxes."""
+"""Modèles de persistance pour les SMS entrants et les files d'attente d'outbox (MQTT / HTTP)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from enum import Enum
 
 
 class InboundStatus(str, Enum):
+    """Cycle de vie d'un SMS entrant dans la table inbound_sms."""
     RECEIVED = "RECEIVED"
     INVALID = "INVALID"
     VALIDATED = "VALIDATED"
@@ -16,17 +17,20 @@ class InboundStatus(str, Enum):
 
 
 class OutboxStatus(str, Enum):
+    """Statut de livraison d'un message dans la table outbox."""
     PENDING = "PENDING"
     PUBLISHED = "PUBLISHED"
     FAILED = "FAILED"
 
 
 class StoreDisposition(str, Enum):
+    """Statut d'insertion brute du SMS (nouveau ou doublon exact)."""
     STORED = "STORED"
     DUPLICATE = "DUPLICATE"
 
 
 class QueueDisposition(str, Enum):
+    """Statut de mise en file d'attente outbox (nouveau, doublon logique ou conflit d'ID)."""
     QUEUED = "QUEUED"
     DUPLICATE_LOGICAL = "DUPLICATE_LOGICAL"
     MESSAGE_ID_CONFLICT = "MESSAGE_ID_CONFLICT"
@@ -34,6 +38,7 @@ class QueueDisposition(str, Enum):
 
 @dataclass(frozen=True)
 class RawSmsInput:
+    """Données brutes issues de la réception modem d'un SMS."""
     sender: str
     raw_body: str
     modem_timestamp: str | None = None
@@ -42,6 +47,7 @@ class RawSmsInput:
 
 @dataclass(frozen=True)
 class InboundSmsRecord:
+    """Enregistrement persisté d'un SMS dans la table `inbound_sms`."""
     id: int
     sender: str
     modem_timestamp: str | None
@@ -67,6 +73,7 @@ class InboundSmsRecord:
 
 @dataclass(frozen=True)
 class OutboxRecord:
+    """Message en attente d'expédition backend dans la table `outbox`."""
     id: int
     sms_id: int
     topic: str
@@ -91,16 +98,19 @@ class OutboxRecord:
 
 @dataclass(frozen=True)
 class StoreRawSmsResult:
+    """Résultat du stockage initial du SMS brut."""
     disposition: StoreDisposition
     record: InboundSmsRecord
 
     @property
     def durably_stored(self) -> bool:
+        """Garantit que le message est écrit de façon pérenne sur le disque SQLite."""
         return True
 
 
 @dataclass(frozen=True)
 class QueueResult:
+    """Résultat de la tentative d'ajout d'une charge utile dans la table outbox."""
     disposition: QueueDisposition
     sms_id: int
     outbox: OutboxRecord | None

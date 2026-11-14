@@ -1,4 +1,4 @@
-"""Synchronous ingestion pipeline from raw SMS to durable MQTT outbox."""
+"""Pipeline d'ingestion synchrone : du SMS brut vers l'outbox persistant (MQTT / HTTP)."""
 
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 class IngestionDisposition(str, Enum):
+    """Résultat de l'ingestion d'un SMS dans le pipeline."""
     QUEUED = "QUEUED"
     INVALID = "INVALID"
     DUPLICATE_RAW = "DUPLICATE_RAW"
@@ -47,6 +48,7 @@ class IngestionDisposition(str, Enum):
 
 @dataclass(frozen=True)
 class IngestionConfig:
+    """Paramètres par défaut pour la mise en file d'attente outbox."""
     mqtt_topic_prefix: str = "djua/test"
     mqtt_qos: int = 1
     mqtt_retain: bool = False
@@ -54,6 +56,7 @@ class IngestionConfig:
 
 @dataclass(frozen=True)
 class IngestionResult:
+    """Résultat détaillé de l'opération d'ingestion pour le coordinateur."""
     disposition: IngestionDisposition
     sms_id: int
     outbox_id: int | None = None
@@ -62,10 +65,13 @@ class IngestionResult:
 
     @property
     def durably_stored(self) -> bool:
+        """Garantit la persistance du SMS en base SQLite."""
         return True
 
 
 class SmsIngestionService:
+    """Service d'ingestion assurant l'analyse, l'authentification et l'insertion dans l'outbox."""
+
     def __init__(
         self,
         repository: SmsRepository,
@@ -79,6 +85,7 @@ class SmsIngestionService:
         ).validate()
 
     def ingest(self, raw: RawSmsInput) -> IngestionResult:
+        """Ingère un SMS brut : stockage SQLite immédiat, détection de protocole, validation et outbox."""
         stored = self.repository.store_raw_sms(raw)
         sms_id = stored.record.id
 
@@ -127,7 +134,7 @@ class SmsIngestionService:
         raw: RawSmsInput,
         sms_id: int,
     ) -> IngestionResult:
-        """Preserve the historical D1 path unchanged."""
+        """Traite le protocole historique D1."""
 
         try:
             telemetry = parse_d1(raw.raw_body)
@@ -215,6 +222,7 @@ class SmsIngestionService:
         sms_id: int,
         gateway_received_at: str,
     ) -> IngestionResult:
+        """Traite les trames D2 (D2T périodiques et D2E alertes géofence) avec validation de sécurité HMAC."""
         try:
             message = parse_d2(raw.raw_body)
         except D2ProtocolError as exc:
@@ -355,6 +363,7 @@ class SmsIngestionService:
         sms_id: int,
         gateway_received_at: str,
     ) -> IngestionResult:
+        """Traite les trames compactes D2T2 avec charges DC et contrôle de sécurité HMAC."""
         try:
             message = parse_d2t2(raw.raw_body)
         except D2ProtocolError as exc:

@@ -1,4 +1,4 @@
-"""Reliable bridge from persistent outbox records to MQTT PUBACK."""
+"""Passerelle fiable assurant la publication des enregistrements d'outbox et le suivi des PUBACK."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class PublishDisposition(str, Enum):
+    """Résultat de la tentative d'envoi d'un message d'outbox vers MQTT."""
     STARTED = "STARTED"
     ACKED = "ACKED"
     FAILED = "FAILED"
@@ -26,6 +27,7 @@ class PublishDisposition(str, Enum):
 
 @dataclass(frozen=True)
 class PublishResult:
+    """Rapport d'état de la publication pour un message d'outbox donné."""
     disposition: PublishDisposition
     outbox_id: int
     mid: int | None = None
@@ -34,6 +36,7 @@ class PublishResult:
 
 @dataclass
 class _InFlight:
+    """Suivi d'un message MQTT en cours d'acheminement, en attente de son PUBACK."""
     outbox_id: int
     started_monotonic: float
 
@@ -44,6 +47,7 @@ def compute_backoff_seconds(
     base_seconds: float,
     max_seconds: float,
 ) -> float:
+    """Calcule le délai de temporisation exponentielle (backoff) selon le nombre de tentatives."""
     if attempt_count < 0:
         raise ValueError("attempt_count must be >= 0")
     exponent = min(attempt_count, 30)
@@ -51,6 +55,12 @@ def compute_backoff_seconds(
 
 
 class MqttPublisher:
+    """Gestionnaire de publication garantissant la sémantique de livraison At-Least-Once.
+    
+    Suit les messages en vol (in-flight), gère les expirations par timeout si le broker
+    ne renvoie pas le PUBACK, et planifie les réessais avec backoff exponentiel.
+    """
+
     def __init__(
         self,
         client: MqttClientProtocol,
@@ -77,10 +87,12 @@ class MqttPublisher:
         client.set_publish_ack_handler(self._on_publish_ack)
 
     def is_in_flight(self, outbox_id: int) -> bool:
+        """Vérifie si le message est actuellement en cours d'attente d'acquittement MQTT."""
         with self._lock:
             return outbox_id in self._outbox_to_mid
 
     def publish(self, outbox: OutboxRecord) -> PublishResult:
+        """Tente de publier un message d'outbox en attente via le client MQTT."""
         if outbox.status is not OutboxStatus.PENDING:
             return PublishResult(PublishDisposition.NOT_PENDING, outbox.id)
         if self.is_in_flight(outbox.id):
@@ -130,6 +142,7 @@ class MqttPublisher:
         return PublishResult(PublishDisposition.STARTED, outbox.id, mid=receipt.mid)
 
     def record_failure(self, outbox: OutboxRecord, error: str) -> OutboxRecord:
+        """Enregistre un échec de publication et calcule la date du prochain essai."""
         delay = compute_backoff_seconds(
             outbox.attempt_count,
             base_seconds=self.retry_base_seconds,
@@ -150,6 +163,7 @@ class MqttPublisher:
         return updated
 
     def expire_timeouts(self) -> list[int]:
+        """Détecte les messages en vol ayant dépassé le délai sans PUBACK et les passe en échec."""
         now = self._monotonic()
         expired: list[tuple[int, int]] = []
         with self._lock:
@@ -168,6 +182,7 @@ class MqttPublisher:
         return outbox_ids
 
     def _on_publish_ack(self, mid: int) -> None:
+        """Callback interne appelé lors de la réception d'un PUBACK pour le message mid."""
         outbox_id: int | None = None
         with self._lock:
             if mid in self._ignored_mids:
@@ -182,6 +197,7 @@ class MqttPublisher:
         self._mark_published(outbox_id, mid)
 
     def _mark_published(self, outbox_id: int, mid: int) -> None:
+        """Marque durablement le message comme PUBLISHED dans la table outbox de SQLite."""
         try:
             self.repository.mark_outbox_published(outbox_id)
         except Exception:

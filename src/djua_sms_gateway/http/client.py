@@ -1,4 +1,4 @@
-"""Small synchronous JSON POST client backed only by urllib."""
+"""Client HTTP synchrone léger pour requêtes JSON POST, basé uniquement sur la bibliothèque standard urllib."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 @dataclass(frozen=True)
 class HttpResult:
+    """Résultat immuable d'une requête HTTP (code de statut et corps de réponse)."""
     status_code: int
     body: str = ""
 
@@ -21,16 +22,19 @@ class HttpResult:
 
 
 class HttpClientProtocol(Protocol):
+    """Contrat d'interface pour le client HTTP."""
     def post_json(self, url: str, body: str, headers: dict[str, str]) -> HttpResult:
-        """POST the supplied JSON body and return the response status."""
+        """Envoie une requête POST avec le corps JSON et retourne le statut HTTP."""
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
+    """Gestionnaire qui refuse les redirections automatiques pour préserver la méthode POST et les en-têtes."""
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
 
 class UrllibHttpClient:
+    """Implémentation du client HTTP reposant sur urllib standard, sans dépendance externe."""
     def __init__(
         self,
         *,
@@ -43,6 +47,7 @@ class UrllibHttpClient:
         self.verify_tls = verify_tls
 
     def post_json(self, url: str, body: str, headers: dict[str, str]) -> HttpResult:
+        """Exécute un appel HTTP POST synchrone avec encodage UTF-8 et gestion des erreurs de transport."""
         request = Request(
             url,
             data=body.encode("utf-8"),
