@@ -163,6 +163,52 @@ class HttpOutboxFlowTests(unittest.TestCase):
 
         self.assertEqual(client.calls[0][0], "https://backend.invalid/telemetry-route")
 
+    def test_url_interpolates_device_id_template(self):
+        repository = self.repository("http")
+        queued = self.ingest(repository)
+        client = FakeHttpClient()
+        worker = HttpOutboxWorker(
+            repository,
+            client,
+            HttpConfig(
+                backend_url="https://djua-energy-backend.onrender.com/api/iot/{device_id}/telemetry",
+                extra_headers={"x-device-token": "djua"},
+            ),
+            clock=lambda: self.now,
+        )
+
+        result = worker.run_once()
+        self.assertEqual(result.published, 1)
+        self.assertEqual(
+            client.calls[0][0],
+            "https://djua-energy-backend.onrender.com/api/iot/DJUA-KIN-000001/telemetry",
+        )
+        self.assertEqual(client.calls[0][2]["x-device-token"], "djua")
+        self.assertEqual(client.calls[0][2]["Content-Type"], "application/json")
+
+    def test_url_auto_interpolates_api_iot_telemetry(self):
+        repository = self.repository("http")
+        queued = self.ingest(repository)
+        client = FakeHttpClient()
+        worker = HttpOutboxWorker(
+            repository,
+            client,
+            HttpConfig(
+                backend_url="https://djua-energy-backend.onrender.com/api/iot/telemetry",
+                extra_headers={"x-device-token": "secret-key"},
+            ),
+            clock=lambda: self.now,
+        )
+
+        result = worker.run_once()
+        self.assertEqual(result.published, 1)
+        self.assertEqual(
+            client.calls[0][0],
+            "https://djua-energy-backend.onrender.com/api/iot/DJUA-KIN-000001/telemetry",
+        )
+        self.assertEqual(client.calls[0][2]["x-device-token"], "secret-key")
+        self.assertEqual(client.calls[0][2]["Content-Type"], "application/json")
+
 
 if __name__ == "__main__":
     unittest.main()

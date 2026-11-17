@@ -414,6 +414,9 @@ class HttpConfig:
             raise ValueError(
                 "HTTP_EXTRA_HEADERS_JSON must be a JSON object of string values"
             )
+        iot_api_key = os.getenv("IOT_API_KEY", "").strip()
+        if iot_api_key and "x-device-token" not in headers:
+            headers["x-device-token"] = iot_api_key
         return cls(
             backend_url=backend_url,
             events_url=os.getenv("HTTP_EVENTS_URL", "").strip() or None,

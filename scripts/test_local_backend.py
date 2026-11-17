@@ -24,24 +24,35 @@ def main():
     print("🚀 TEST PASSERELLE -> BACKEND LOCAL (10.20.20.251:5000)")
     print("=" * 75)
 
-    base_url = "http://10.20.20.251:5000"
-    telemetry_url = f"{base_url}/api/iot/telemetry"
-    alerts_url = f"{base_url}/api/iot/alerts"
+    # Adresse locale (10.252.252.52:5000 par défaut ou lue dans config/gateway.env)
+    base_url = "http://10.252.252.52:5000"
+    config_file = ROOT / "config" / "gateway.env"
+    if config_file.exists():
+        for line in config_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("HTTP_BACKEND_URL="):
+                val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if "/api/iot/telemetry" in val:
+                    base_url = val.replace("/api/iot/telemetry", "")
+                break
+
     device_id = "DJUA-KIN-000001"
+    telemetry_url = f"{base_url}/api/iot/{device_id}/telemetry"
+    alerts_url = f"{base_url}/api/iot/{device_id}/alerts"
 
     print(f"🎯 Backend cible : {telemetry_url}")
     print(f"🎯 Alerts cible  : {alerts_url}")
     print("-" * 75)
 
     # 1. Verification prealable de l'accessibilite du serveur
-    print("🔍 1. Test de connectivite reseau vers le backend local...")
+    print("🔍 1. Test de connectivite reseau vers le backend...")
     try:
         req = urllib.request.Request(f"{base_url}/api/devices", headers={"User-Agent": "DjuaSmsTest/1.0"})
         with urllib.request.urlopen(req, timeout=5) as res:
             print(f"   -> Serveur accessible ! (HTTP {res.getcode()})")
     except Exception as exc:
         print(f"   ❌ Impossible de joindre {base_url} : {exc}")
-        print("   Verifiez que le serveur Express/Node.js tourne bien sur 10.20.20.251.")
+        print(f"   Verifiez que le serveur Express/Node.js tourne bien sur {base_url}.")
         return
 
     # 2. Preparation de la base de donnees de test temporaire
